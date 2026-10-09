@@ -1,0 +1,67 @@
+:root {
+  --bg: #0f1115;
+  --panel: #161a21;
+  --line: #262b35;
+  --text: #d7dce5;
+  --muted: #7d8795;
+  --accent: #e0a458;
+  --ok: #4caf7a;
+  --doubt: #e06c75;
+  font-family: ui-sans-serif, -apple-system, "Inter", system-ui, sans-serif;
+  font-size: 13px;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; background: var(--bg); color: var(--text); }
+button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover { border-color: var(--muted); }
+textarea { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; width: 100%; resize: vertical; }
+kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: var(--line); border-radius: 4px; padding: 1px 5px; color: var(--text); }
+
+.app { display: grid; grid-template-columns: 300px 1fr 400px; grid-template-rows: 44px 1fr; height: 100%; }
+.top { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.top .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.top .meta { color: var(--muted); white-space: nowrap; }
+.top .progress { margin-left: auto; color: var(--muted); white-space: nowrap; }
+.top .progress b { color: var(--text); }
+
+.queue { border-right: 1px solid var(--line); overflow: auto; background: var(--panel); }
+.commit { padding: 10px 12px 4px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+.commit:first-child { border-top: 0; }
+.commit .sha { font-family: ui-monospace, Menlo, monospace; color: var(--accent); margin-right: 6px; }
+.chunk { display: flex; gap: 8px; align-items: center; padding: 5px 12px 5px 18px; cursor: pointer; border-left: 3px solid transparent; }
+.chunk:hover { background: var(--bg); }
+.chunk.current { border-left-color: var(--accent); background: var(--bg); }
+.chunk .path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.chunk .stat { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); }
+.chunk.understood { opacity: 0.4; }
+.chunk.understood .path { text-decoration: line-through; }
+.chunk.doubt .path { color: var(--doubt); }
+.chunk .mark { width: 14px; text-align: center; font-size: 11px; }
+
+.main { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+.main .bar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); color: var(--muted); }
+.main .bar .path { color: var(--text); font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.main .bar .keys { margin-left: auto; white-space: nowrap; }
+.main .diff { flex: 1; overflow: auto; padding: 0 8px 40px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5; }
+.main .empty { padding: 60px; color: var(--muted); text-align: center; }
+
+.room { border-left: 1px solid var(--line); display: flex; flex-direction: column; background: var(--panel); min-height: 0; }
+.room .head { padding: 10px 14px; border-bottom: 1px solid var(--line); color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.room .head b { color: var(--text); }
+.room .log { flex: 1; overflow: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
+.msg { white-space: pre-wrap; line-height: 1.5; }
+.msg.q { border-left: 2px solid var(--doubt); padding-left: 10px; }
+.msg.q .ref { font-family: ui-monospace, Menlo, monospace; color: var(--muted); font-size: 11px; display: block; margin-bottom: 4px; }
+.msg.a { color: var(--text); }
+.msg.shape { color: var(--text); border-left: 2px solid var(--accent); padding-left: 10px; }
+.msg.err { color: var(--doubt); }
+.room .compose { padding: 10px 14px; border-top: 1px solid var(--line); }
+.room .compose .ref { font-family: ui-monospace, Menlo, monospace; color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+.room .compose .hint { color: var(--muted); font-size: 11px; margin-top: 6px; }
+.picker { padding: 14px; display: flex; flex-direction: column; gap: 10px; overflow: auto; }
+.picker .s { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.picker .s:hover { border-color: var(--muted); }
+.picker .s .cwd { font-family: ui-monospace, Menlo, monospace; color: var(--muted); font-size: 11px; }
+.picker .s .sum { margin-top: 2px; }
+.thinking { color: var(--muted); font-style: italic; }
