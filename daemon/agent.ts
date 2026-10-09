@@ -53,10 +53,14 @@ export async function* ask(opts: AskOptions): AsyncGenerator<AgentEvent> {
   }
 }
 
-export async function sessionsFor(repo: string): Promise<SDKSessionInfo[]> {
-  // ponytail: list everything and match the repo name in cwd; a picker per clone path is later work
-  const all = await listSessions({ limit: 300 });
-  return all.filter((s) => (s.cwd || '').toLowerCase().includes(repo.toLowerCase()));
+export async function sessionsFor(repo: string, workRoot: string): Promise<SDKSessionInfo[]> {
+  // ponytail: sessions whose cwd mentions the repo name come first, then everything else recent.
+  // The user's clone may be named differently (bruno vs bruno-enterprise-edition), so never filter hard.
+  // Our own PR sessions live under workRoot and are not worth forking.
+  const all = (await listSessions({ limit: 300 })).filter((s) => !(s.cwd || '').startsWith(workRoot));
+  const needle = repo.toLowerCase();
+  const hit = (s: SDKSessionInfo) => (s.cwd || '').toLowerCase().includes(needle);
+  return [...all.filter(hit), ...all.filter((s) => !hit(s))].slice(0, 40);
 }
 
 export function shapePrompt(s: PrState): string {

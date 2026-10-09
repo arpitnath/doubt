@@ -130,7 +130,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/sessions') {
-    const list = await sessionsFor(s.repo);
+    const list = await sessionsFor(s.repo, WORK_ROOT);
     return json(res, 200, list.map((x) => ({ sessionId: x.sessionId, cwd: x.cwd, gitBranch: x.gitBranch, summary: x.summary || x.firstPrompt || '', lastModified: x.lastModified, fileSize: x.fileSize })));
   }
 
