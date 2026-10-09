@@ -1,0 +1,31 @@
+{
+  "name": "doubt",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "A reading tool for PRs at agent volume: one chunk at a time, understood or doubt.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "tsx watch daemon/server.ts",
+    "start": "tsx daemon/server.ts",
+    "ui:dev": "vite --config ui/vite.config.ts",
+    "ui:build": "vite build --config ui/vite.config.ts",
+    "spike": "tsx spike/sdk.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.295",
+    "@pierre/diffs": "^1.5.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  }
+}
