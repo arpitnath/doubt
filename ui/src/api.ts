@@ -26,25 +26,29 @@ export const setVerdict = (chunkId: string, verdict: Verdict): Promise<unknown> 
   fetch('/api/verdict', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chunkId, verdict }) });
 
 export async function stream(path: string, body: unknown, onEvent: (ev: AgentEvent) => void): Promise<void> {
-  const res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  if (!res.ok || !res.body) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    onEvent({ type: 'error', message: String(err.error || res.statusText) });
-    return;
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let idx: number;
-    while ((idx = buf.indexOf('\n\n')) >= 0) {
-      const frame = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      const line = frame.split('\n').find((l) => l.startsWith('data: '));
-      if (line) onEvent(JSON.parse(line.slice(6)) as AgentEvent);
+  try {
+    const res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      onEvent({ type: 'error', message: String(err.error || res.statusText) });
+      return;
     }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const line = frame.split('\n').find((l) => l.startsWith('data: '));
+        if (line) onEvent(JSON.parse(line.slice(6)) as AgentEvent);
+      }
+    }
+  } catch (err) {
+    onEvent({ type: 'error', message: err instanceof Error ? err.message : String(err) });
   }
 }

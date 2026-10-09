@@ -3,6 +3,7 @@ import { PatchDiff, type SelectedLineRange } from '@pierre/diffs/react';
 import { getDiff, getPr, getSessions, setVerdict, stream, type Chunk, type PrState, type SessionInfo } from './api';
 
 type Msg = { kind: 'shape' | 'q' | 'a' | 'err'; text: string; ref?: string };
+type Lines = { start: number; end: number };
 
 export function App() {
   const [pr, setPr] = useState<PrState | null>(null);
@@ -37,8 +38,11 @@ export function App() {
 
   useEffect(() => {
     if (!current) return;
+    let cancelled = false; // j/j fast: the older response must not land on the newer chunk
     setSelection(null);
-    getDiff(current).then((d) => setPatch(d.patch));
+    setPatch('');
+    getDiff(current).then((d) => { if (!cancelled) setPatch(d.patch); });
+    return () => { cancelled = true; };
   }, [current]);
 
   useEffect(() => {
@@ -47,6 +51,16 @@ export function App() {
 
   const chunk = useMemo(() => pr?.chunks.find((c) => c.id === current) ?? null, [pr, current]);
   const commitBySha = useMemo(() => new Map(pr?.commits.map((c) => [c.sha, c]) ?? []), [pr]);
+  const lines: Lines | undefined = selection
+    ? { start: Math.min(selection.start, selection.end), end: Math.max(selection.start, selection.end) }
+    : undefined;
+
+  const options = useMemo(() => ({
+    diffStyle: 'split' as const,
+    theme: { dark: 'github-dark' as const, light: 'github-light' as const },
+    enableLineSelection: true,
+    onLineSelectionEnd: (range: SelectedLineRange | null) => setSelection(range)
+  }), []);
 
   // ---- actions ---------------------------------------------------------------------------------
   const move = useCallback((dir: 1 | -1) => {
@@ -56,50 +70,58 @@ export function App() {
     if (next) setCurrent(next.id);
   }, [pr, current]);
 
-  const advance = useCallback(() => {
-    if (!pr || !current) return;
-    const i = pr.chunks.findIndex((c) => c.id === current);
-    const next = pr.chunks.slice(i + 1).find((c) => c.verdict === 'none') ?? pr.chunks.find((c) => c.verdict === 'none');
-    if (next) setCurrent(next.id);
-  }, [pr, current]);
+  const markChunk = useCallback((id: string, verdict: Chunk['verdict']) => {
+    setPr((p) => (p ? { ...p, chunks: p.chunks.map((c) => (c.id === id ? { ...c, verdict } : c)) } : p));
+  }, []);
 
   const understood = useCallback(async () => {
     if (!pr || !chunk) return;
     await setVerdict(chunk.id, 'understood');
-    setPr({ ...pr, chunks: pr.chunks.map((c) => (c.id === chunk.id ? { ...c, verdict: 'understood' } : c)) });
-    advance();
-  }, [pr, chunk, advance]);
+    markChunk(chunk.id, 'understood');
+    const i = pr.chunks.findIndex((c) => c.id === chunk.id);
+    const next = pr.chunks.slice(i + 1).find((c) => c.verdict === 'none') ?? pr.chunks.find((c) => c.verdict === 'none' && c.id !== chunk.id);
+    if (next) setCurrent(next.id);
+  }, [pr, chunk, markChunk]);
 
   const startSession = useCallback(async (forkFrom?: string) => {
+    if (busy) return;
     setBusy(true);
     setSessions(null);
     setLive('');
-    await stream('/api/session', { forkFrom }, (ev) => {
-      if (ev.type === 'text') setLive((t) => t + ev.text);
-      if (ev.type === 'done') { setLog((l) => [...l, { kind: 'shape', text: ev.text }]); setLive(''); setPr((p) => (p ? { ...p, sessionId: ev.sessionId } : p)); }
-      if (ev.type === 'error') setLog((l) => [...l, { kind: 'err', text: ev.message }]);
-    });
-    setBusy(false);
-  }, []);
+    try {
+      await stream('/api/session', { forkFrom }, (ev) => {
+        if (ev.type === 'text') setLive((t) => t + ev.text);
+        if (ev.type === 'done') { setLog((l) => [...l, { kind: 'shape', text: ev.text }]); setLive(''); setPr((p) => (p ? { ...p, sessionId: ev.sessionId, forkedFrom: forkFrom } : p)); }
+        if (ev.type === 'error') { setLog((l) => [...l, { kind: 'err', text: ev.message }]); getSessions().then(setSessions); }
+      });
+    } finally {
+      setBusy(false);
+      setLive('');
+    }
+  }, [busy]);
 
   const sendDoubt = useCallback(async () => {
-    if (!pr || !chunk || !question.trim()) return;
-    const lines = selection ? { start: Math.min(selection.start, selection.end), end: Math.max(selection.start, selection.end) } : undefined;
+    if (!pr || !chunk || !question.trim() || busy) return;
     const ref = refOf(chunk, lines);
-    setLog((l) => [...l, { kind: 'q', text: question, ref }]);
-    setPr({ ...pr, chunks: pr.chunks.map((c) => (c.id === chunk.id ? { ...c, verdict: 'doubt' } : c)) });
+    const q = question;
+    setLog((l) => [...l, { kind: 'q', text: q, ref }]);
+    markChunk(chunk.id, 'doubt');
     setComposing(false);
+    setQuestion('');
+    setSelection(null);
     setBusy(true);
     setLive('');
-    const q = question;
-    setQuestion('');
-    await stream('/api/doubt', { chunkId: chunk.id, lines, question: q }, (ev) => {
-      if (ev.type === 'text') setLive((t) => t + ev.text);
-      if (ev.type === 'done') { setLog((l) => [...l, { kind: 'a', text: ev.text }]); setLive(''); }
-      if (ev.type === 'error') setLog((l) => [...l, { kind: 'err', text: ev.message }]);
-    });
-    setBusy(false);
-  }, [pr, chunk, question, selection]);
+    try {
+      await stream('/api/doubt', { chunkId: chunk.id, lines, question: q }, (ev) => {
+        if (ev.type === 'text') setLive((t) => t + ev.text);
+        if (ev.type === 'done') { setLog((l) => [...l, { kind: 'a', text: ev.text }]); setLive(''); }
+        if (ev.type === 'error') setLog((l) => [...l, { kind: 'err', text: ev.message }]);
+      });
+    } finally {
+      setBusy(false);
+      setLive('');
+    }
+  }, [pr, chunk, question, lines, busy, markChunk]);
 
   // ---- keys: u understood, d doubt, j/k move, esc close -----------------------------------------
   useEffect(() => {
@@ -112,21 +134,14 @@ export function App() {
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === 'u') void understood();
-      else if (e.key === 'd') { if (pr?.sessionId) { setComposing(true); setTimeout(() => textareaRef.current?.focus(), 0); } }
+      else if (e.key === 'd') { if (pr?.sessionId && !busy) { setComposing(true); setTimeout(() => textareaRef.current?.focus(), 0); } }
       else if (e.key === 'j') move(1);
       else if (e.key === 'k') move(-1);
       else if (e.key === 'Escape') setComposing(false);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [understood, sendDoubt, move, pr?.sessionId]);
-
-  const options = useMemo(() => ({
-    diffStyle: 'split' as const,
-    theme: { dark: 'github-dark' as const, light: 'github-light' as const },
-    enableLineSelection: true,
-    onLineSelectionEnd: (range: SelectedLineRange | null) => setSelection(range)
-  }), []);
+  }, [understood, sendDoubt, move, pr?.sessionId, busy]);
 
   if (!pr) return <div className="main"><div className="empty">loading…</div></div>;
 
@@ -180,13 +195,14 @@ export function App() {
           <div className="picker">
             <div>Start the PR session. Fork one that already knows this repo, or start fresh.</div>
             <button onClick={() => startSession()} disabled={busy}>Fresh session</button>
-            {sessions === null ? <div className="thinking">loading sessions…</div> : sessions.map((s) => (
-              <div key={s.sessionId} className="s" onClick={() => !busy && startSession(s.sessionId)}>
-                <div className="cwd">{s.cwd} · {s.gitBranch || ''} · {new Date(s.lastModified).toLocaleDateString()} · {Math.round((s.fileSize || 0) / 1024)} KB</div>
+            {sessions === null ? <div className="thinking">{busy ? 'reading the PR…' : 'loading sessions…'}</div> : sessions.map((s) => (
+              <div key={s.sessionId} className="s" onClick={() => startSession(s.sessionId)}>
+                <div className="cwd">{s.cwd || '(no cwd)'} · {s.gitBranch || ''} · {new Date(s.lastModified).toLocaleDateString()} · {Math.round((s.fileSize || 0) / 1024)} KB</div>
                 <div className="sum">{s.summary.slice(0, 120)}</div>
               </div>
             ))}
             {live && <div className="msg shape">{live}</div>}
+            {log.filter((m) => m.kind === 'err').map((m, i) => <div key={i} className="msg err">{m.text}</div>)}
           </div>
         ) : (
           <>
@@ -202,7 +218,7 @@ export function App() {
             </div>
             {composing && chunk && (
               <div className="compose">
-                <div className="ref">{refOf(chunk, selection ? { start: Math.min(selection.start, selection.end), end: Math.max(selection.start, selection.end) } : undefined)}</div>
+                <div className="ref">{refOf(chunk, lines)}</div>
                 <textarea ref={textareaRef} rows={3} value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="What do you not get about this chunk?" />
                 <div className="hint"><kbd>enter</kbd> send · <kbd>esc</kbd> cancel · select lines in the diff first to anchor the doubt</div>
               </div>
@@ -214,7 +230,7 @@ export function App() {
   );
 }
 
-function refOf(chunk: Chunk | undefined, lines?: { start: number; end: number }): string {
+function refOf(chunk: Chunk | undefined, lines?: Lines): string {
   if (!chunk) return '';
   return `${chunk.sha.slice(0, 7)} ${chunk.path}${lines ? `:${lines.start}-${lines.end}` : ''}`;
 }

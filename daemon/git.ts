@@ -38,7 +38,7 @@ export function authEnv(token: string): NodeJS.ProcessEnv {
 }
 
 export async function git(dir: string, args: string[], env: NodeJS.ProcessEnv = {}): Promise<string> {
-  const { stdout } = await execFile('git', ['-C', dir, ...args], {
+  const { stdout } = await execFile('git', ['-C', dir, '--literal-pathspecs', ...args], {
     maxBuffer: MAX_BUFFER,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...env }
   });
@@ -69,7 +69,8 @@ export async function checkout(input: CheckoutInput): Promise<Checkout> {
     });
   }
 
-  await git(dir, ['fetch', '--quiet', 'origin', `refs/pull/${ref.number}/head:refs/doubt/pr`, `${baseRef}:refs/doubt/base`], env);
+  // '+' so a force-pushed head or a rewritten base still fetches on a reused work dir.
+  await git(dir, ['fetch', '--quiet', 'origin', `+refs/pull/${ref.number}/head:refs/doubt/pr`, `+${baseRef}:refs/doubt/base`], env);
   await git(dir, ['checkout', '--quiet', '--detach', headSha]);
   const baseSha = (await git(dir, ['merge-base', 'HEAD', 'refs/doubt/base'])).trim();
 
@@ -83,7 +84,8 @@ export async function checkout(input: CheckoutInput): Promise<Checkout> {
 }
 
 export async function commits(dir: string, baseSha: string, headSha: string): Promise<Commit[]> {
-  const out = await git(dir, ['log', '--reverse', '--format=%H%x1f%s%x1f%an%x1f%P%x1e', `${baseSha}..${headSha}`]);
+  // --topo-order so a parent never trails its child when commit dates are skewed
+  const out = await git(dir, ['log', '--reverse', '--topo-order', '--format=%H%x1f%s%x1f%an%x1f%P%x1e', `${baseSha}..${headSha}`]);
   return out
     .split('\x1e')
     .map((r) => r.trim())
@@ -95,7 +97,7 @@ export async function commits(dir: string, baseSha: string, headSha: string): Pr
     });
 }
 
-// A merge commit shows only its conflict-resolution lines (git show --remerge-diff, git >= 2.35).
+// A merge commit shows only its conflict-resolution lines (git show --remerge-diff, git >= 2.36).
 // A normal commit shows the diff it made against its parent (px0 git.go:855 flags).
 function diffArgs(commit: Commit, extra: string[]): string[] {
   return commit.merge
@@ -103,15 +105,23 @@ function diffArgs(commit: Commit, extra: string[]): string[] {
     : ['diff-tree', '--no-commit-id', '-r', '--root', ...extra, commit.sha];
 }
 
+// --numstat -z: "adds\tdels\tpath\0", or for a rename "adds\tdels\t\0old\0new\0".
+function parseNumstat(out: string): Map<string, { adds: number; dels: number }> {
+  const counts = new Map<string, { adds: number; dels: number }>();
+  const parts = out.split('\0');
+  for (let i = 0; i < parts.length; i++) {
+    const rec = parts[i];
+    if (!rec) continue;
+    const [a, d, p] = rec.split('\t');
+    const path = p === '' ? parts[(i += 2)] : p;
+    if (path) counts.set(path, { adds: Number(a) || 0, dels: Number(d) || 0 });
+  }
+  return counts;
+}
+
 export async function commitFiles(dir: string, commit: Commit): Promise<ChangedFile[]> {
   const names = await git(dir, diffArgs(commit, ['--name-status', '-z']));
-  const numstat = await git(dir, diffArgs(commit, ['--numstat']));
-
-  const counts = new Map<string, { adds: number; dels: number }>();
-  for (const line of numstat.split('\n')) {
-    const [a, d, ...rest] = line.split('\t');
-    if (rest.length) counts.set(rest.join('\t'), { adds: Number(a) || 0, dels: Number(d) || 0 });
-  }
+  const counts = parseNumstat(await git(dir, diffArgs(commit, ['--numstat', '-z'])));
 
   const files: ChangedFile[] = [];
   const parts = names.split('\0').filter(Boolean);
