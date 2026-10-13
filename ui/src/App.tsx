@@ -1,19 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PatchDiff, type FileDiffMetadata, type FileDiffLoadedFiles } from '@pierre/diffs/react';
-import { getChunkDiff, getFileAt, getFileDiff, getPr, isNoise, readingOrder, setVerdict, type Chunk, type PrFile, type PrState, type VerdictTarget } from './api';
+import { PatchDiff, File as PierreFile, type FileDiffMetadata, type FileDiffLoadedFiles } from '@pierre/diffs/react';
+import { fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, isNoise, readingOrder, setVerdict, type Chunk, type PrFile, type PrState, type VerdictTarget } from './api';
 import { Tree } from './Tree';
 
 // ponytail: the Claude room is out of the UI for now; the daemon still serves /api/session and /api/doubt.
-type Tab = 'files' | 'commits';
-type View = { kind: 'file'; path: string } | { kind: 'commit'; sha: string } | { kind: 'chunk'; id: string };
+type Tab = 'files' | 'commits' | 'repo';
+type View = { kind: 'file'; path: string } | { kind: 'commit'; sha: string } | { kind: 'chunk'; id: string } | { kind: 'repo'; path: string };
 interface Item { key: string; path: string; oldPath?: string; oldRev: string; newRev: string; read: boolean; status: string; adds: number; dels: number }
 
 export function App() {
   const [pr, setPr] = useState<PrState | null>(null);
+  const [tree, setTree] = useState<string[]>([]);
   const [tab, setTab] = useState<Tab>('files');
   const [view, setView] = useState<View | null>(null);
   const [patches, setPatches] = useState<Record<string, string>>({});
+  const [repoFile, setRepoFile] = useState<{ path: string; contents: string } | null>(null);
+  const [fullFile, setFullFile] = useState(false); // Zed-style: whole file with inline hunks
+  const [split, setSplit] = useState(true);
+  const [palette, setPalette] = useState<string | null>(null); // fuzzy-open query, null when closed
+  const [paletteIdx, setPaletteIdx] = useState(0);
   const diffRef = useRef<HTMLDivElement>(null);
+  const paletteRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     getPr().then((s) => {
@@ -22,6 +29,7 @@ export function App() {
       const first = order.find((f) => s.readFiles[f.path] === undefined && !isNoise(f)) ?? order.find((f) => s.readFiles[f.path] === undefined) ?? order[0];
       if (first) setView({ kind: 'file', path: first.path });
     });
+    getTree().then((t) => setTree(t.paths));
   }, []);
 
   const ordered = useMemo(() => (pr ? readingOrder(pr.files) : []), [pr]);
@@ -31,7 +39,7 @@ export function App() {
 
   // what the center shows
   const items: Item[] = useMemo(() => {
-    if (!pr || !view) return [];
+    if (!pr || !view || view.kind === 'repo') return [];
     if (view.kind === 'file') {
       const f = fileByPath.get(view.path);
       return f ? [{ key: f.path, path: f.path, oldPath: f.oldPath, oldRev: 'base', newRev: 'head', read: isRead(f.path), status: f.status, adds: f.adds, dels: f.dels }] : [];
@@ -43,11 +51,16 @@ export function App() {
   useEffect(() => {
     let cancelled = false; // fast j/j: an older response must not land on the newer view
     setPatches({});
-    const loads = items.map((it) => (it.oldRev === 'base' ? getFileDiff(it.path) : getChunkDiff(it.key)).then((d) => [it.key, d.patch] as const));
-    Promise.all(loads).then((pairs) => { if (!cancelled) setPatches(Object.fromEntries(pairs)); });
+    setRepoFile(null);
+    if (view?.kind === 'repo') {
+      getFileAt('head', view.path).then((r) => { if (!cancelled) setRepoFile({ path: view.path, contents: r.contents ?? '' }); });
+    } else {
+      const loads = items.map((it) => (it.oldRev === 'base' ? getFileDiff(it.path) : getChunkDiff(it.key)).then((d) => [it.key, d.patch] as const));
+      Promise.all(loads).then((pairs) => { if (!cancelled) setPatches(Object.fromEntries(pairs)); });
+    }
     diffRef.current?.scrollTo({ top: 0 });
     return () => { cancelled = true; };
-  }, [items]);
+  }, [items, view]);
 
   // ---- verdicts ----------------------------------------------------------------------------------
   const apply = useCallback(async (target: VerdictTarget, verdict: 'understood' | 'none') => {
@@ -73,7 +86,7 @@ export function App() {
   }, [ordered]);
 
   const judge = useCallback(async (verdict: 'understood' | 'none') => {
-    if (!pr || !view) return;
+    if (!pr || !view || view.kind === 'repo') return;
     if (view.kind === 'file') {
       const readFiles = await apply({ path: view.path }, verdict);
       if (verdict === 'understood' && readFiles) { const n = nextFile(view.path, readFiles); if (n) setView({ kind: 'file', path: n }); }
@@ -117,7 +130,7 @@ export function App() {
       const i = pr.chunks.findIndex((c) => c.id === view.id);
       const n = pr.chunks[i + dir];
       if (n) setView({ kind: 'chunk', id: n.id });
-    } else {
+    } else if (view.kind === 'commit') {
       const i = pr.commits.findIndex((c) => c.sha === view.sha);
       const n = pr.commits[i + dir];
       if (n) setView({ kind: 'commit', sha: n.sha });
@@ -134,27 +147,45 @@ export function App() {
     if (next !== undefined) pane.scrollTo({ top: next, behavior: 'smooth' });
   }, []);
 
+  // open any path: a changed file shows its PR diff, anything else shows the file at the PR head
+  const openPath = useCallback((path: string) => {
+    setView(fileByPath.has(path) ? { kind: 'file', path } : { kind: 'repo', path });
+  }, [fileByPath]);
+
   const switchTab = useCallback((t: Tab) => {
     if (!pr) return;
     setTab(t);
-    if (t === 'files') {
-      const path = view && view.kind !== 'commit' ? (view.kind === 'file' ? view.path : pr.chunks.find((c) => c.id === view.id)?.path) : undefined;
-      const first = path && fileByPath.has(path) ? path : (ordered.find((f) => !isRead(f.path)) ?? ordered[0])?.path;
-      if (first) setView({ kind: 'file', path: first });
-    } else {
+    if (t === 'commits') {
       const first = pr.chunks.find((c) => c.verdict === 'none') ?? pr.chunks[0];
       if (first) setView({ kind: 'commit', sha: first.sha });
+    } else if (t === 'files' && view?.kind !== 'file') {
+      const path = view?.kind === 'chunk' ? pr.chunks.find((c) => c.id === view.id)?.path : view?.kind === 'repo' ? view.path : undefined;
+      const first = path && fileByPath.has(path) ? path : (ordered.find((f) => !isRead(f.path)) ?? ordered[0])?.path;
+      if (first) setView({ kind: 'file', path: first });
     }
   }, [pr, view, fileByPath, ordered, isRead]);
+
+  const matches = useMemo(() => (palette === null ? [] : fuzzy(palette, tree)), [palette, tree]);
 
   // ---- keys ---------------------------------------------------------------------------------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (palette !== null) {
+        if (e.key === 'Escape') setPalette(null);
+        else if (e.key === 'ArrowDown') { e.preventDefault(); setPaletteIdx((i) => Math.min(i + 1, matches.length - 1)); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); setPaletteIdx((i) => Math.max(i - 1, 0)); }
+        else if (e.key === 'Enter') { const m = matches[paletteIdx]; if (m) { openPath(m); setPalette(null); } }
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'p') { e.preventDefault(); setPalette(''); setPaletteIdx(0); setTimeout(() => paletteRef.current?.focus(), 0); return; }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key === 'u') void judge('understood');
+      if (e.key === 'p') { e.preventDefault(); setPalette(''); setPaletteIdx(0); } // preventDefault: the p must not land in the input that autofocuses
+      else if (e.key === 'u') void judge('understood');
       else if (e.key === 'x') void judge('none');
       else if (e.key === 'n') void skipNoise();
-      else if (e.key === 's') switchTab(tab === 'files' ? 'commits' : 'files');
+      else if (e.key === 'e') setFullFile((v) => !v);
+      else if (e.key === 'w') setSplit((v) => !v);
+      else if (e.key === 's') switchTab(tab === 'files' ? 'commits' : tab === 'commits' ? 'repo' : 'files');
       else if (e.key === 'c' && tab === 'commits') {
         if (view?.kind === 'chunk') { const c = pr?.chunks.find((k) => k.id === view.id); if (c) setView({ kind: 'commit', sha: c.sha }); }
         else if (view?.kind === 'commit') { const c = pr?.chunks.find((k) => k.sha === view.sha); if (c) setView({ kind: 'chunk', id: c.id }); }
@@ -166,17 +197,20 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [judge, skipNoise, switchTab, move, jumpStack, tab, view, pr]);
+  }, [judge, skipNoise, switchTab, move, jumpStack, openPath, tab, view, pr, palette, matches, paletteIdx]);
 
   // ---- render -------------------------------------------------------------------------------------
-  const baseOptions = useMemo(() => ({
-    diffStyle: 'split' as const,
+  const diffOptions = useMemo(() => ({
+    diffStyle: (fullFile ? 'unified' : split ? 'split' : 'unified') as 'split' | 'unified',
     theme: { dark: 'github-dark' as const, light: 'github-light' as const },
     lineDiffType: 'word' as const,
-    stickyHeader: true
-  }), []);
+    stickyHeader: true,
+    expandUnchanged: fullFile
+  }), [fullFile, split]);
 
-  // context expansion: pierre asks for both full sides when a collapsed region is opened
+  const fileOptions = useMemo(() => ({ theme: { dark: 'github-dark' as const, light: 'github-light' as const }, stickyHeader: true }), []);
+
+  // context expansion: pierre asks for both full sides when a collapsed region is opened, or at once in full-file mode
   const loaderFor = useCallback((it: Item) => async (meta: FileDiffMetadata): Promise<FileDiffLoadedFiles> => {
     const oldName = meta.prevName || meta.name;
     const parent = it.oldRev.endsWith('^');
@@ -193,9 +227,10 @@ export function App() {
   const noiseLeft = pr.files.filter((f) => isNoise(f) && !isRead(f.path)).length;
   const commit = view?.kind === 'commit' ? commitBySha.get(view.sha) : undefined;
   const head = items[0];
+  const currentPath = view?.kind === 'file' || view?.kind === 'repo' ? view.path : null;
 
   return (
-    <div className="app two">
+    <div className="app two" tabIndex={-1} ref={(el) => { if (el && !el.contains(document.activeElement)) el.focus(); }} style={{ outline: 'none' }}>
       <div className="top">
         <span className="title">#{pr.number} {pr.title}</span>
         <span className="meta">{pr.owner}/{pr.repo} · {pr.author} · {pr.baseRef} ← {pr.headSha.slice(0, 7)}</span>
@@ -204,61 +239,87 @@ export function App() {
 
       <div className="queue">
         <div className="tabs">
-          <button className={tab === 'files' ? 'on' : ''} onClick={() => switchTab('files')}>Files</button>
+          <button className={tab === 'files' ? 'on' : ''} onClick={() => switchTab('files')}>Changes</button>
           <button className={tab === 'commits' ? 'on' : ''} onClick={() => switchTab('commits')}>Commits</button>
-          <span className="hint"><kbd>s</kbd></span>
+          <button className={tab === 'repo' ? 'on' : ''} onClick={() => switchTab('repo')}>Repo</button>
+          <span className="hint"><kbd>s</kbd> <kbd>p</kbd></span>
         </div>
-        {tab === 'files' ? (
-          <Tree files={pr.files} readFiles={pr.readFiles} current={view?.kind === 'file' ? view.path : null} onPick={(path) => setView({ kind: 'file', path })} />
-        ) : (
-          pr.commits.map((c) => {
-            const mine = pr.chunks.filter((k) => k.sha === c.sha);
-            const done = mine.length > 0 && mine.every((k) => k.verdict !== 'none');
-            const isCurrent = view?.kind === 'commit' && view.sha === c.sha;
-            return (
-              <div key={c.sha}>
-                <div className={`commit ${isCurrent ? 'current' : ''} ${done ? 'done' : ''}`} onClick={() => setView({ kind: 'commit', sha: c.sha })} title="show every file of this commit">
-                  <span className="sha">{c.sha.slice(0, 7)}</span>{c.merge ? '⎇ ' : ''}{c.subject}
-                  <span className="count">{done ? '✓' : `${mine.filter((k) => k.verdict === 'none').length}/${mine.length}`}</span>
-                </div>
-                {mine.map((k) => (
-                  <div key={k.id} className={`chunk ${k.verdict} ${view?.kind === 'chunk' && view.id === k.id ? 'current' : ''}`} onClick={() => setView({ kind: 'chunk', id: k.id })} title={k.path}>
-                    <span className="mark">{k.verdict === 'understood' ? '✓' : ''}</span>
-                    <span className="path">{k.path}</span>
-                    <span className="stat">+{k.adds}/-{k.dels}</span>
-                  </div>
-                ))}
+        {tab === 'files' && <Tree paths={pr.files.map((f) => f.path)} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={openPath} />}
+        {tab === 'repo' && (tree.length ? <Tree paths={tree} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={openPath} repo /> : <div className="empty">loading tree…</div>)}
+        {tab === 'commits' && pr.commits.map((c) => {
+          const mine = pr.chunks.filter((k) => k.sha === c.sha);
+          const done = mine.length > 0 && mine.every((k) => k.verdict !== 'none');
+          const isCurrent = view?.kind === 'commit' && view.sha === c.sha;
+          return (
+            <div key={c.sha}>
+              <div className={`commit ${isCurrent ? 'current' : ''} ${done ? 'done' : ''}`} onClick={() => setView({ kind: 'commit', sha: c.sha })} title="show every file of this commit">
+                <span className="sha">{c.sha.slice(0, 7)}</span>{c.merge ? '⎇ ' : ''}{c.subject}
+                <span className="count">{done ? '✓' : `${mine.filter((k) => k.verdict === 'none').length}/${mine.length}`}</span>
               </div>
-            );
-          })
-        )}
+              {mine.map((k) => (
+                <div key={k.id} className={`chunk ${k.verdict} ${view?.kind === 'chunk' && view.id === k.id ? 'current' : ''}`} onClick={() => setView({ kind: 'chunk', id: k.id })} title={k.path}>
+                  <span className="mark">{k.verdict === 'understood' ? '✓' : ''}</span>
+                  <span className="path">{k.path}</span>
+                  <span className="stat">+{k.adds}/-{k.dels}</span>
+                </div>
+              ))}
+            </div>
+          );
+        })}
       </div>
 
       <div className="main">
         <div className="bar">
-          {commit
-            ? <><span className="path">{commit.sha.slice(0, 7)} {commit.subject}</span><span>{items.length} files · {commit.author}</span></>
-            : head
-              ? <><span className="path">{head.path}</span><span>{head.oldRev === 'base' ? 'vs merge-base' : head.newRev.slice(0, 7)} · {head.status} · +{head.adds}/-{head.dels}{head.read ? ' · read' : ''}</span></>
-              : <span>nothing left to read</span>}
+          {view?.kind === 'repo'
+            ? <><span className="path">{view.path}</span><span>at PR head · not changed by this PR</span></>
+            : commit
+              ? <><span className="path">{commit.sha.slice(0, 7)} {commit.subject}</span><span>{items.length} files · {commit.author}</span></>
+              : head
+                ? <><span className="path">{head.path}</span><span>{head.oldRev === 'base' ? 'vs merge-base' : head.newRev.slice(0, 7)} · {head.status} · +{head.adds}/-{head.dels}{head.read ? ' · read' : ''}</span></>
+                : <span>nothing left to read</span>}
           <span className="keys">
-            <kbd>u</kbd> read &nbsp; <kbd>x</kbd> unmark &nbsp; <kbd>j</kbd>/<kbd>k</kbd> move
+            <kbd>u</kbd> read &nbsp; <kbd>x</kbd> unmark &nbsp; <kbd>j</kbd>/<kbd>k</kbd> move &nbsp;
+            <kbd>e</kbd> {fullFile ? 'hunks only' : 'full file'} &nbsp; <kbd>w</kbd> {split ? 'unified' : 'split'}
             {tab === 'commits' && <> &nbsp; <kbd>c</kbd> {view?.kind === 'commit' ? 'one file' : 'whole commit'} &nbsp; <kbd>[</kbd>/<kbd>]</kbd> file</>}
           </span>
         </div>
         <div className="diff" ref={diffRef}>
-          {items.length === 0 && <div className="empty">every file read</div>}
+          {view?.kind === 'repo' && (repoFile
+            ? <div className="stack"><PierreFile file={{ name: repoFile.path, contents: repoFile.contents }} options={fileOptions} disableWorkerPool /></div>
+            : <div className="empty">loading {view.path}…</div>)}
+          {view?.kind !== 'repo' && items.length === 0 && <div className="empty">every file read</div>}
           {items.map((it) => (
             <div key={it.key} className={`stack ${it.read ? 'understood' : ''}`}>
               {patches[it.key] !== undefined
                 ? patches[it.key].trim()
-                  ? <PatchDiff key={it.key} patch={patches[it.key]} options={{ ...baseOptions, loadDiffFiles: loaderFor(it) }} disableWorkerPool />
+                  ? <PatchDiff key={`${it.key}:${fullFile}:${split}`} patch={patches[it.key]} options={{ ...diffOptions, loadDiffFiles: loaderFor(it) }} disableWorkerPool />
                   : <div className="empty">{it.path}: no textual diff (binary or empty)</div>
                 : <div className="empty">loading {it.path}…</div>}
             </div>
           ))}
         </div>
       </div>
+
+      {palette !== null && (
+        <div className="palette" onClick={() => setPalette(null)}>
+          <div className="box" onClick={(e) => e.stopPropagation()}>
+            <input ref={paletteRef} autoFocus value={palette} placeholder="open file by name…" onChange={(e) => { setPalette(e.target.value); setPaletteIdx(0); }} />
+            {matches.length === 0
+              ? <div className="none">{palette ? 'no match' : `${tree.length} files in the repo`}</div>
+              : matches.map((m, i) => {
+                const f = fileByPath.get(m);
+                const slash = m.lastIndexOf('/');
+                return (
+                  <div key={m} className={`row ${i === paletteIdx ? 'on' : ''}`} onMouseEnter={() => setPaletteIdx(i)} onClick={() => { openPath(m); setPalette(null); }}>
+                    <span className="st">{f ? f.status : ''}</span>
+                    <span>{m.slice(slash + 1)}</span>
+                    <span className="dir">{slash > 0 ? m.slice(0, slash) : ''}</span>
+                  </div>
+                );
+              })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

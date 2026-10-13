@@ -217,6 +217,12 @@ export async function prFileDiff(dir: string, baseSha: string, headSha: string, 
   return git(dir, ['diff', '--no-color', '-M', baseSha, headSha, '--', ...paths]);
 }
 
+// every path in the tree at a revision; tree objects are present even in a blob-filtered clone
+export async function lsTree(dir: string, rev: string): Promise<string[]> {
+  const out = await git(dir, ['ls-tree', '-r', '-z', '--name-only', rev]);
+  return out.split('\0').filter(Boolean);
+}
+
 export async function fileAt(dir: string, rev: string, path: string): Promise<string | null> {
   try {
     return await git(dir, ['show', `${rev}:${path}`]);

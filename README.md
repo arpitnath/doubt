@@ -18,13 +18,13 @@ The daemon clones the base repo (blob-filtered) under `~/.doubt/work`, fetches t
 
 ## Reading
 
-The sidebar has two tabs, `s` switches. **Files** is a GitHub-style tree of every file the PR changes against its merge-base, with status, counts, a kind badge (test, docs, cfg, lock, gen, snap) and `ws` when the change is whitespace only. Click a file to read its PR-wide diff; `j`/`k` walk the files in reading order: source first, then tests, then docs and config, then generated files and lockfiles. **Commits** lists commits oldest first; click one to see every file it touched stacked, `c` drops to one file.
+The sidebar has three tabs, `s` cycles. **Changes** is a GitHub-style tree of every file the PR changes against its merge-base, with status, counts, a kind badge (test, docs, cfg, lock, gen, snap) and `ws` when the change is whitespace only. Click a file to read its PR-wide diff; `j`/`k` walk the files in reading order: source first, then tests, then docs and config, then generated files and lockfiles. **Commits** lists commits oldest first; click one to see every file it touched stacked, `c` drops to one file. **Repo** is the whole tree at the PR head, like an editor's explorer, folded except where the changes live; any file opens read-only for context. `p` opens any file by fuzzy name.
 
 Lockfiles, generated files, snapshots and whitespace-only changes are noise: the top bar counts them and `n` marks them all read in one go.
 
 A file is read when every commit's change to it is read, in either tab. Read marks are keyed by the file's content, so after the author pushes again only the files that actually changed come back as unread.
 
-Changed lines highlight the changed words. Collapsed context expands to the full file. Click the page once after it opens so it has keyboard focus.
+Changed lines highlight the changed words. Collapsed context expands to the full file, or `e` shows the whole file with the hunks inline, like Zed; `w` switches split and unified. Click the page once after it opens so it has keyboard focus.
 
 | key | does |
 |---|---|
@@ -32,7 +32,10 @@ Changed lines highlight the changed words. Collapsed context expands to the full
 | `x` | unmark it |
 | `n` | mark every noise file read |
 | `j` / `k` | next / previous file (reading order) or commit |
-| `s` | switch between the Files tree and the Commits list |
+| `s` | cycle Changes, Commits, Repo |
+| `p` | open any file by fuzzy name |
+| `e` | whole file with inline hunks, or hunks only |
+| `w` | split or unified |
 | `c` | in Commits: whole commit or one file |
 | `[` / `]` | in a stacked commit: jump between files |
 

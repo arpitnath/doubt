@@ -6,7 +6,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
-import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, commitDiff, prFiles, prFileDiff, fileAt, type Commit } from './git.js';
+import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, commitDiff, prFiles, prFileDiff, fileAt, lsTree, type Commit } from './git.js';
 import { ghToken, prMeta } from './github.js';
 import { load, save, carryOver, stateKey, WORK_ROOT, type PrState, type Chunk, type Verdict } from './state.js';
 import { ask, sessionsFor, shapePrompt, doubtPrompt, commitDoubtPrompt, takePrompt, type AgentEvent } from './agent.js';
@@ -63,6 +63,7 @@ if (prev && prev.headSha === meta.headSha && prev.files) {
 }
 
 const commitBySha = new Map<string, Commit>(state.commits.map((c) => [c.sha, c]));
+const treePaths = await lsTree(state.dir, state.headSha); // the whole repo at the PR head, for the Repo tab and fuzzy open
 let busy = false; // ponytail: one question at a time per PR session; a queue if it ever matters
 
 // ---- helpers ------------------------------------------------------------------------------------
@@ -125,6 +126,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const s = state;
 
   if (req.method === 'GET' && url.pathname === '/api/pr') return json(res, 200, { ...s, busy });
+  if (req.method === 'GET' && url.pathname === '/api/tree') return json(res, 200, { paths: treePaths });
 
   // one file's diff: within one commit (`chunk`), or PR-wide against the merge-base (`path`)
   if (req.method === 'GET' && url.pathname === '/api/diff') {

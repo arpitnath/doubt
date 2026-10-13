@@ -57,6 +57,16 @@ kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: 
 .node.file.read .name { text-decoration: line-through; }
 .node.file.noise .name { color: var(--muted); }
 .node .badge { font-size: 10px; padding: 0 5px; border-radius: 4px; background: var(--line); color: var(--muted); }
+.node.plain { color: var(--muted); }
+.node.dir.plain { opacity: 0.7; }
+.palette { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; z-index: 10; }
+.palette .box { width: 640px; max-width: 90vw; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); overflow: hidden; }
+.palette input { width: 100%; font: inherit; font-size: 14px; color: inherit; background: var(--bg); border: 0; border-bottom: 1px solid var(--line); padding: 12px 14px; outline: none; }
+.palette .row { display: flex; gap: 10px; align-items: center; padding: 6px 14px; cursor: pointer; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.palette .row.on, .palette .row:hover { background: var(--bg); }
+.palette .row .dir { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette .row .st { color: var(--accent); width: 12px; }
+.palette .none { padding: 12px 14px; color: var(--muted); }
 .stack { margin: 10px 0 18px; }
 .stack.understood { opacity: 0.45; }
 .msg.take { color: var(--muted); border-left: 2px solid var(--muted); padding-left: 10px; font-style: italic; }
