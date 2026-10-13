@@ -70,6 +70,8 @@ export async function checkout(input: CheckoutInput): Promise<Checkout> {
     });
   }
 
+  // Keep the previous head reachable under refs/doubt/prev so an interdiff (old head to new head) stays possible after gc.
+  try { const prevHead = (await git(dir, ['rev-parse', '--verify', '--quiet', 'refs/doubt/pr'])).trim(); if (prevHead && prevHead !== headSha) await git(dir, ['update-ref', 'refs/doubt/prev', prevHead]); } catch { /* first checkout */ }
   // '+' so a force-pushed head or a rewritten base still fetches on a reused work dir.
   await git(dir, ['fetch', '--quiet', 'origin', `+refs/pull/${ref.number}/head:refs/doubt/pr`, `+${baseRef}:refs/doubt/base`], env);
   await git(dir, ['checkout', '--quiet', '--detach', headSha]);

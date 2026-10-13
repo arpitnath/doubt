@@ -30,11 +30,11 @@ interface Open { state: PrState; commitBySha: Map<string, Commit>; treePaths: st
 const open = new Map<string, Open>();
 const opening = new Map<string, Promise<Open>>(); // ponytail: a double paste must not clone twice
 
-async function openPr(url: string): Promise<Open> {
+async function openPr(url: string, force = false): Promise<Open> {
   const ref = parsePrUrl(url);
   const key = stateKey({ owner: ref.owner, repo: ref.repo, number: ref.number });
   const have = open.get(key);
-  if (have) return have;
+  if (have && !force) return have;
   const inflight = opening.get(key);
   if (inflight) return inflight;
 
@@ -45,11 +45,11 @@ async function openPr(url: string): Promise<Open> {
     console.error(`> checking out ${meta.headSha.slice(0, 7)} (${meta.headRef} -> ${meta.baseRef})`);
     const co = await checkout({ ref, cloneUrl: meta.cloneUrl, headSha: meta.headSha, baseRef: meta.baseRef, apiBaseSha: meta.baseSha, token, workRoot: WORK_ROOT });
 
-    const prev = load(key);
+    const prev = have?.state ?? load(key);
     let state: PrState;
     if (prev && prev.headSha === meta.headSha && prev.files) {
       state = prev;
-      console.error(`> resumed: ${Object.keys(state.readFiles).length}/${state.files.length} files read`);
+      console.error(`> ${force ? 'synced, head unchanged' : 'resumed'}: ${Object.keys(state.readFiles).length}/${state.files.length} files read`);
     } else {
       const list = await commits(co.dir, co.baseSha, meta.headSha);
       const chunks: Chunk[] = [];
@@ -60,19 +60,23 @@ async function openPr(url: string): Promise<Open> {
       }
       const files = await prFiles(co.dir, co.baseSha, meta.headSha);
       const diffFile = await fullDiff(co.dir, co.baseSha, meta.headSha);
+      // which files actually changed content since the previous head, for the "new" badge and the interdiff
+      const prevPair = new Map((prev?.files ?? []).map((f) => [f.path, `${f.oldBlob}:${f.newBlob}`]));
+      const changedSince = prev ? files.filter((f) => prevPair.get(f.path) !== `${f.oldBlob}:${f.newBlob}`).map((f) => f.path) : [];
       state = {
         url, owner: ref.owner, repo: ref.repo, number: ref.number,
         title: meta.title, author: meta.author,
         headSha: meta.headSha, baseSha: co.baseSha, baseRef: meta.baseRef,
         dir: co.dir, diffFile, commits: list, chunks, files, readFiles: {}, doubts: prev?.doubts ?? [],
+        hunkMarks: {}, prevHeadSha: prev?.headSha, changedSince,
         sessionId: prev?.sessionId, forkedFrom: prev?.forkedFrom, shape: prev?.shape
       };
       carryOver(state, prev);
       save(state);
-      console.error(`> ${list.length} commits, ${chunks.length} chunks, ${files.length} files${prev ? ` (new head; ${Object.keys(state.readFiles).length} read files carried over)` : ''}`);
+      console.error(`> ${list.length} commits, ${chunks.length} chunks, ${files.length} files${prev ? ` (new head; ${changedSince.length} changed, ${Object.keys(state.readFiles).length} read files carried over)` : ''}`);
     }
 
-    const o: Open = { state, commitBySha: new Map(state.commits.map((c) => [c.sha, c])), treePaths: await lsTree(state.dir, state.headSha), busy: false, openedAt: Date.now() };
+    const o: Open = { state, commitBySha: new Map(state.commits.map((c) => [c.sha, c])), treePaths: await lsTree(state.dir, state.headSha), busy: false, openedAt: have?.openedAt ?? Date.now(), lang: state.headSha === have?.state.headSha ? have?.lang : undefined };
     open.set(key, o);
     return o;
   })();
@@ -139,11 +143,11 @@ function serveStatic(res: ServerResponse, path: string): void {
       res.end('doubt daemon is up. Build the UI first: npm run ui:build');
       return;
     }
-    res.writeHead(200, { 'content-type': 'text/html' }); // SPA fallback
+    res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-cache' }); // SPA fallback; never a stale shell after a rebuild
     res.end(readFileSync(index));
     return;
   }
-  res.writeHead(200, { 'content-type': MIME[extname(file)] || 'application/octet-stream' });
+  res.writeHead(200, { 'content-type': MIME[extname(file)] || 'application/octet-stream', 'cache-control': file.endsWith('index.html') ? 'no-cache' : 'public, max-age=31536000, immutable' });
   res.end(readFileSync(file));
 }
 
@@ -202,6 +206,14 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const s = o.state;
 
   if (req.method === 'GET' && url.pathname === '/api/pr') return json(res, 200, { ...s, busy: o.busy });
+
+  // on-demand sync: refetch the head; a new head rebuilds, keeps marks for untouched files, records what changed
+  if (req.method === 'POST' && url.pathname === '/api/sync') {
+    const before = s.headSha;
+    const n = await openPr(s.url, true);
+    const changed = n.state.headSha !== before;
+    return json(res, 200, { changed, headSha: n.state.headSha, changedSince: changed ? n.state.changedSince ?? [] : [], read: Object.keys(n.state.readFiles).length, files: n.state.files.length });
+  }
   if (req.method === 'GET' && url.pathname === '/api/tree') return json(res, 200, { paths: o.treePaths });
 
   // workspace search over the PR head
@@ -252,7 +264,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (path) {
       const f = s.files.find((x) => x.path === path);
       if (!f) return json(res, 404, { error: 'unknown file' });
-      return json(res, 200, { file: f, patch: await prFileDiff(s.dir, s.baseSha, s.headSha, f.path, f.oldPath) });
+      // since=1: only what changed between the previous head and this one, for a file that came back unread
+      if (url.searchParams.get('since') === '1' && s.prevHeadSha) {
+        try { return json(res, 200, { file: f, since: true, patch: await prFileDiff(s.dir, s.prevHeadSha, s.headSha, f.path, f.oldPath) }); }
+        catch { /* previous head gone (gc, or a stale record): fall back to the whole diff */ }
+      }
+      return json(res, 200, { file: f, since: false, patch: await prFileDiff(s.dir, s.baseSha, s.headSha, f.path, f.oldPath) });
     }
     const chunk = s.chunks.find((c) => c.id === url.searchParams.get('chunk'));
     if (!chunk) return json(res, 404, { error: 'unknown chunk' });

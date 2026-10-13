@@ -48,6 +48,8 @@ export interface PrState {
   files: PrFile[];
   readFiles: Record<string, string>; // path -> `${oldBlob}:${newBlob}` when fully read
   hunkMarks?: Record<string, number[]>; // item key (path, or chunk id) -> indexes of hunks marked read
+  prevHeadSha?: string; // the head before the last sync that changed it; enables per-file interdiff
+  changedSince?: string[]; // files whose content changed at that sync
   doubts: Doubt[];
 }
 

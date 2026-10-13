@@ -8,7 +8,8 @@ export interface PrFile { path: string; oldPath?: string; status: string; adds: 
 export interface PrState {
   url: string; owner: string; repo: string; number: number; title: string; author: string;
   headSha: string; baseSha: string; baseRef: string; dir: string;
-  commits: Commit[]; chunks: Chunk[]; files: PrFile[]; readFiles: Record<string, string>; hunkMarks?: Record<string, number[]>; busy: boolean;
+  commits: Commit[]; chunks: Chunk[]; files: PrFile[]; readFiles: Record<string, string>; hunkMarks?: Record<string, number[]>;
+  prevHeadSha?: string; changedSince?: string[]; busy: boolean;
 }
 export interface KnownPr { key: string; url: string; owner: string; repo: string; number: number; title: string; author: string; read: number; files: number; open: boolean; updated: number }
 
@@ -28,8 +29,10 @@ export const getPr = (key: string): Promise<PrState> => fetch(`/api/pr${q(key)}`
 export const getTree = (key: string): Promise<{ paths: string[] }> => fetch(`/api/tree${q(key)}`).then((r) => ok(r));
 export const getChunkDiff = (key: string, chunkId: string): Promise<{ chunk: Chunk; patch: string }> =>
   fetch(`/api/diff${q(key, `&chunk=${encodeURIComponent(chunkId)}`)}`).then((r) => ok(r));
-export const getFileDiff = (key: string, path: string): Promise<{ file: PrFile; patch: string }> =>
-  fetch(`/api/diff${q(key, `&path=${encodeURIComponent(path)}`)}`).then((r) => ok(r));
+export const getFileDiff = (key: string, path: string, since = false): Promise<{ file: PrFile; patch: string; since: boolean }> =>
+  fetch(`/api/diff${q(key, `&path=${encodeURIComponent(path)}${since ? '&since=1' : ''}`)}`).then((r) => ok(r));
+export const syncPr = (key: string): Promise<{ changed: boolean; headSha: string; changedSince: string[]; read: number; files: number }> =>
+  fetch(`/api/sync${q(key)}`, { method: 'POST' }).then((r) => ok(r));
 export const getFileAt = (key: string, rev: string, path: string, parent = false): Promise<{ contents: string | null }> =>
   fetch(`/api/file${q(key, `&rev=${encodeURIComponent(rev)}&path=${encodeURIComponent(path)}${parent ? '&parent=1' : ''}`)}`).then((r) => ok(r));
 

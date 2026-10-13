@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PatchDiff, File as PierreFile, type DiffLineAnnotation, type FileDiffMetadata, type FileDiffLoadedFiles, type SelectedLineRange } from '@pierre/diffs/react';
-import { definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, isNoise, outline, parseHunks, readingOrder, references, search, setHunk, setVerdict, type Chunk, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
+import { definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, syncPr, isNoise, outline, parseHunks, readingOrder, references, search, setHunk, setVerdict, type Chunk, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
 import { Tree } from './Tree';
 import { Landing } from './Landing';
 import { Agent, type AgentHandle } from './Agent';
@@ -46,6 +46,8 @@ function Review({ prKey }: { prKey: string }) {
   const [agentOpen, setAgentOpen] = useState(false);
   const [comment, setComment] = useState<string | null>(null); // the review comment being written, null when closed
   const [cursor, setCursor] = useState<{ key: string; hunk: number } | null>(null); // the hunk last jumped to
+  const [since, setSince] = useState(false); // interdiff: only what changed since the previous head
+  const changedSet = useMemo(() => new Set(pr?.changedSince ?? []), [pr?.changedSince]);
   const agentRef = useRef<AgentHandle>(null);
   const commentRef = useRef<HTMLTextAreaElement>(null);
   const [paletteIdx, setPaletteIdx] = useState(0);
@@ -94,12 +96,12 @@ function Review({ prKey }: { prKey: string }) {
     if (view?.kind === 'repo') {
       getFileAt(prKey, 'head', view.path).then((r) => { if (!cancelled) setRepoFile({ path: view.path, contents: r.contents ?? '' }); });
     } else {
-      const loads = items.map((it) => (it.oldRev === 'base' ? getFileDiff(prKey, it.path) : getChunkDiff(prKey, it.key)).then((d) => [it.key, d.patch] as const));
+      const loads = items.map((it) => (it.oldRev === 'base' ? getFileDiff(prKey, it.path, since && changedSet.has(it.path)) : getChunkDiff(prKey, it.key)).then((d) => [it.key, d.patch] as const));
       Promise.all(loads).then((pairs) => { if (!cancelled) setPatches(Object.fromEntries(pairs)); });
     }
     if (!jump) diffRef.current?.scrollTo({ top: 0 });
     return () => { cancelled = true; };
-  }, [itemsKey, view?.kind, view?.kind === 'repo' ? view.path : '', prKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [itemsKey, view?.kind, view?.kind === 'repo' ? view.path : '', prKey, since]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // land on a line once the target has rendered: pierre marks rows with data-line
   useEffect(() => {
@@ -396,6 +398,23 @@ function Review({ prKey }: { prKey: string }) {
     setComment(null);
   }, [pr, commentTarget, comment, textOf]);
 
+  // ---- sync on demand: refetch the head, keep marks for untouched files, show what changed -------
+  const sync = useCallback(async () => {
+    setToast('syncing…');
+    try {
+      const r = await syncPr(prKey);
+      if (!r.changed) { setToast('head unchanged'); return; }
+      const fresh = await getPr(prKey);
+      setPr(fresh);
+      setSince(true);
+      setToast(`new head ${r.headSha.slice(0, 7)}: ${r.changedSince.length} file${r.changedSince.length === 1 ? '' : 's'} changed, ${r.read} still read`);
+      const first = readingOrder(fresh.files).find((f) => r.changedSince.includes(f.path));
+      if (first) setView({ kind: 'file', path: first.path });
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : String(err));
+    }
+  }, [prKey]);
+
   // ---- keys ---------------------------------------------------------------------------------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -427,6 +446,8 @@ function Review({ prKey }: { prKey: string }) {
       else if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); stepHunk(e.shiftKey ? -1 : 1); }
       else if (e.key === 'm') void toggleHunk();
       else if (e.key === 'b') void showHistory();
+      else if (e.key === 'r') void sync();
+      else if (e.key === 'i') { if (pr?.prevHeadSha) setSince((v) => !v); else setToast('no previous head yet: nothing to compare since'); }
       else if (e.key === 'y') void copyRef(false);
       else if (e.key === 'Y') void copyRef(true);
       else if (e.key === 'u') void judge('understood');
@@ -446,7 +467,7 @@ function Review({ prKey }: { prKey: string }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [judge, skipNoise, switchTab, move, jumpStack, openPalette, pickRow, copyRef, sendComment, commentTarget, comment, stepHunk, toggleHunk, showHistory, tab, view, pr, palette, paletteRows, paletteIdx]);
+  }, [judge, skipNoise, switchTab, move, jumpStack, openPalette, pickRow, copyRef, sendComment, commentTarget, comment, stepHunk, toggleHunk, showHistory, sync, tab, view, pr, palette, paletteRows, paletteIdx]);
 
   // ---- render -------------------------------------------------------------------------------------
   const theme = useMemo(() => ({ dark: 'github-dark' as const, light: 'github-light' as const }), []);
@@ -506,7 +527,7 @@ function Review({ prKey }: { prKey: string }) {
         <a className="home" href="#/" title="all pull requests">doubt</a>
         <span className="title">#{pr.number} {pr.title}</span>
         <span className="meta">{pr.owner}/{pr.repo} · {pr.author} · {pr.baseRef} ← {pr.headSha.slice(0, 7)}</span>
-        <span className="progress"><b>{readCount}</b> / {pr.files.length} files read{noiseLeft ? <> · {noiseLeft} noise, <kbd>n</kbd> skips</> : null}</span>
+        <span className="progress"><b>{readCount}</b> / {pr.files.length} files read{noiseLeft ? <> · {noiseLeft} noise, <kbd>n</kbd> skips</> : null}{changedSet.size ? <> · {changedSet.size} changed since {pr.prevHeadSha?.slice(0, 7)}</> : null} · <kbd>r</kbd> sync</span>
       </div>
 
       <div className="queue">
@@ -516,7 +537,7 @@ function Review({ prKey }: { prKey: string }) {
           <button className={tab === 'repo' ? 'on' : ''} onClick={() => switchTab('repo')}>Repo</button>
           <span className="hint"><kbd>s</kbd> <kbd>p</kbd> <kbd>g</kbd> <kbd>o</kbd></span>
         </div>
-        {tab === 'files' && <Tree paths={pr.files.map((f) => f.path)} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={(p) => openPath(p)} />}
+        {tab === 'files' && <Tree paths={pr.files.map((f) => f.path)} meta={fileByPath} readFiles={pr.readFiles} changed={changedSet} current={currentPath} onPick={(p) => openPath(p)} />}
         {tab === 'repo' && (tree.length ? <Tree paths={tree} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={(p) => openPath(p)} repo /> : <div className="empty">loading tree…</div>)}
         {tab === 'commits' && pr.commits.map((c) => {
           const mine = pr.chunks.filter((k) => k.sha === c.sha);
@@ -547,7 +568,7 @@ function Review({ prKey }: { prKey: string }) {
             : commit
               ? <><span className="path">{commit.sha.slice(0, 7)} {commit.subject}</span><span>{items.length} files · {commit.author}</span></>
               : head
-                ? <><span className="path">{head.path}</span><span>{head.oldRev === 'base' ? 'vs merge-base' : head.newRev.slice(0, 7)} · {head.status} · +{head.adds}/-{head.dels}{head.read ? ' · read' : ''}</span></>
+                ? <><span className="path">{head.path}</span><span>{head.oldRev === 'base' ? (since && changedSet.has(head.path) ? `since ${pr.prevHeadSha?.slice(0, 7)}` : 'vs merge-base') : head.newRev.slice(0, 7)} · {head.status} · +{head.adds}/-{head.dels}{head.read ? ' · read' : ''}{changedSet.has(head.path) ? <> · changed since your read, <kbd>i</kbd> {since ? 'whole diff' : 'only what changed'}</> : null}</span></>
                 : <span>nothing left to read</span>}
           <span className="keys">
             <kbd>u</kbd> read &nbsp; <kbd>x</kbd> unmark &nbsp; <kbd>j</kbd>/<kbd>k</kbd> move &nbsp;

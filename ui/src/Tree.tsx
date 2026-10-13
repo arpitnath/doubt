@@ -43,12 +43,13 @@ interface Props {
   paths: string[]; // every path to show
   meta: Map<string, PrFile>; // changed files, by path
   readFiles: Record<string, string>;
+  changed?: Set<string>; // files whose content changed at the last sync
   current: string | null;
   onPick: (path: string) => void;
   repo?: boolean; // repo mode: start folded except where changes live
 }
 
-export function Tree({ paths, meta, readFiles, current, onPick, repo = false }: Props) {
+export function Tree({ paths, meta, readFiles, changed, current, onPick, repo = false }: Props) {
   const root = useMemo(() => compress(build(paths)), [paths]);
 
   // keys of directories that hold a changed file, so repo mode opens only those
@@ -94,6 +95,7 @@ export function Tree({ paths, meta, readFiles, current, onPick, repo = false }: 
           <span className="mark">{isRead ? '✓' : ''}</span>
           <span className="status">{f ? f.status : ''}</span>
           <span className="name">{name}</span>
+          {f && changed?.has(path) && <span className="badge new">new</span>}
           {f?.wsOnly && <span className="badge">ws</span>}
           {f && !f.wsOnly && BADGE[f.kind] && <span className="badge">{BADGE[f.kind]}</span>}
           {f && <span className="stat">+{f.adds}/-{f.dels}</span>}
