@@ -160,3 +160,27 @@ kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: 
 .thinking { color: var(--muted); font-style: italic; }
 .hunk-read { font-size: 11px; color: var(--ok); padding: 2px 10px; border-left: 2px solid var(--ok); background: rgba(76,175,122,0.08); }
 .node .badge.new { background: var(--accent); color: #111; }
+.node .badge.sig { background: transparent; border: 1px solid var(--line); color: var(--accent); }
+.node .badge.sig.sensitive { color: var(--doubt); border-color: var(--doubt); }
+.node .badge.sig.tests { color: var(--doubt); }
+.sigline { color: var(--muted); font-size: 11px; margin-left: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
+.sigline b { color: var(--accent); font-weight: 500; }
+.doubts { padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
+.doubt { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+.doubt:hover { border-color: var(--muted); }
+.doubt.resolved { opacity: 0.5; }
+.doubt .where { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+.doubt .where input { margin: 0; }
+.doubt .q { margin: 4px 0; white-space: pre-wrap; }
+.doubt .a { color: var(--muted); white-space: pre-wrap; font-size: 12px; max-height: 120px; overflow: hidden; border-top: 1px solid var(--line); padding-top: 4px; margin-top: 4px; }
+.doubt.open .a { max-height: none; }
+.doubt .wait { color: var(--muted); font-style: italic; font-size: 11px; }
+.answer { font-size: 12px; color: var(--text); border-left: 2px solid var(--accent); background: rgba(224,164,88,0.06); padding: 6px 10px; white-space: pre-wrap; max-height: 96px; overflow: hidden; cursor: pointer; }
+.answer.open { max-height: none; }
+.answer .q { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+.desc { border-bottom: 1px solid var(--line); background: var(--panel); padding: 10px 18px; max-height: 40vh; overflow: auto; font-size: 13px; line-height: 1.5; }
+.desc h1, .desc h2, .desc h3 { font-size: 14px; margin: 10px 0 4px; }
+.desc pre { background: var(--bg); padding: 8px; border-radius: 6px; overflow: auto; }
+.desc code { background: var(--bg); padding: 0 4px; border-radius: 4px; }
+.desc ul { padding-left: 18px; }
+.desc .empty { color: var(--muted); }

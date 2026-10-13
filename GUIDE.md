@@ -25,6 +25,17 @@ A reading tool for pull requests at agent volume. You walk a PR one piece at a t
 - Reading order under `j` and `k`: source first, then tests, then docs and config, then generated files and lockfiles. The tree stays in path order for orientation.
 - Noise detection: lockfiles, generated output, snapshots and whitespace-only changes are counted in the top bar and cleared with one key.
 
+**Reading inside a file**
+
+- Space and Shift+Space jump hunk to hunk. `m` marks the current hunk read; when every hunk of a file is marked, the file is read.
+- `b` on selected lines: the commits that last touched them, with PR numbers and authors.
+- `v` shows the PR description above the diff, for checking claims against code.
+- Signals in the tree, facts not grades: rewritten by several commits in this PR, tests or assertions removed, dependencies added, TODO added, same block added twice, sensitive path, CODEOWNERS area in the bar.
+
+**Keeping up with pushes**
+
+- `r` syncs on demand: refetches the head, keeps read marks for files whose content did not change, badges the changed ones `new`, and `i` shows only what changed since the previous head for such a file.
+
 **Verdicts and memory**
 
 - Mark a file or a whole commit read, or unmark it. A file counts as read when every commit's change to it is read, from either tab.
@@ -45,7 +56,7 @@ A reading tool for pull requests at agent volume. You walk a PR one piece at a t
 **Claude Code in the page**
 
 - `a` opens the agent sidebar: every Claude Code session on the machine, with summary, directory, branch and last activity. Click one and it resumes in a real terminal inside the page, the same CLI as in a shell, nothing re-implemented. Or start a new session in the PR checkout. Several run as tabs and survive page reloads.
-- Review comments to the agent: select lines, `d`, write, `⌘enter`. The comment lands in the active session with the file, line range, PR, head SHA and the selected code.
+- Review comments to the agent: select lines, `d`, write, `⌘enter`. The comment lands in the active session with the file, line range, PR, head SHA and the selected code. The answer is read from the session's transcript and shown under those lines and in the Doubts tab, where a doubt is ticked resolved once understood.
 
 **Not in the tool, on purpose**
 
@@ -80,7 +91,7 @@ Paste a PR URL, or click one you opened before. First time on a repo takes 20 to
 | `x` | unmark it |
 | `n` | mark every noise file read |
 | `j` / `k` | next / previous file in reading order, or next commit |
-| `s` | cycle the sidebar: Changes, Commits, Repo |
+| `s` | cycle the sidebar: Changes, Commits, Repo, Doubts |
 | `c` | in Commits: whole commit or one file |
 | `[` / `]` | in a stacked commit: jump between files |
 | `e` | whole file with inline hunks, or hunks only |
@@ -92,7 +103,13 @@ Paste a PR URL, or click one you opened before. First time on a repo takes 20 to
 | `⌘` click | go to definition of a token |
 | `⌘⌥` click | list references of a token |
 | `a` | open or hide the agent sidebar |
-| `d` | review comment on the selected lines; `⌘enter` sends it to the active session |
+| `d` | review comment on the selected lines; `⌘enter` sends it to the active session; the answer lands under the lines and in Doubts |
+| `space` / `⇧space` | next / previous hunk |
+| `m` | mark the current hunk read |
+| `b` | history of the selected lines |
+| `r` | sync the head on demand |
+| `i` | only what changed since the previous head, for a changed file |
+| `v` | PR description on or off |
 | `Esc` | close any palette |
 
 Select lines by clicking a line number and dragging. That selection is what `y`, `Y` and the outline treat as the file in focus; in a stacked commit it also picks which file they mean.
@@ -114,7 +131,7 @@ The tool is built around one rule: approve means understood, not verified. Corre
 
 **Pass 3, commits, when the author committed in steps.** Commits tab. Walk commits with `j` and `k`, each one stacked. This is how to read a PR that tells a story, and how to read a sync PR where each commit is an upstream change already reviewed and only the hand fixes and the merge commit need eyes. A merge commit shows only its conflict-resolution lines.
 
-**When a push arrives.** Open the PR again. Files whose content did not change stay read. The unread set is exactly what is new. Read those, done.
+**When a push arrives.** Press `r`. Files whose content did not change stay read, the changed ones get a `new` badge, and `i` shows only what changed in each. The unread set is exactly what is new. Read those, done.
 
 **Taking a doubt to the agent.** Press `a`, open the session that knows this repo, or a new one in the PR checkout. Then select the lines, `d`, write what you do not get, `⌘enter`. The question arrives in that session with the file, the lines and the code, and the answer streams in the terminal beside the diff. Keep reading while it works. For a dev instead of an agent, `Y` copies the same snippet for a GitHub comment.
 

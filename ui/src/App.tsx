@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PatchDiff, File as PierreFile, type DiffLineAnnotation, type FileDiffMetadata, type FileDiffLoadedFiles, type SelectedLineRange } from '@pierre/diffs/react';
-import { definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, syncPr, isNoise, outline, parseHunks, readingOrder, references, search, setHunk, setVerdict, type Chunk, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
+import { definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, resolveDoubt, syncPr, isNoise, outline, parseHunks, readingOrder, references, search, setHunk, setVerdict, type Chunk, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
 import { Tree } from './Tree';
 import { Landing } from './Landing';
 import { Agent, type AgentHandle } from './Agent';
+import { marked } from 'marked';
 
 // hash routing, nothing more: #/ is the landing page, #/pr/<key> is a review
 function useHash(): string {
@@ -24,7 +25,7 @@ export function App() {
 }
 
 // ponytail: the Claude room is out of the UI for now; the daemon still serves /api/session and /api/doubt.
-type Tab = 'files' | 'commits' | 'repo';
+type Tab = 'files' | 'commits' | 'repo' | 'doubts';
 type View = { kind: 'file'; path: string } | { kind: 'commit'; sha: string } | { kind: 'chunk'; id: string } | { kind: 'repo'; path: string };
 interface Item { key: string; path: string; oldPath?: string; oldRev: string; newRev: string; read: boolean; status: string; adds: number; dels: number }
 type PaletteMode = 'open' | 'search' | 'outline' | 'locs' | 'history';
@@ -47,6 +48,8 @@ function Review({ prKey }: { prKey: string }) {
   const [comment, setComment] = useState<string | null>(null); // the review comment being written, null when closed
   const [cursor, setCursor] = useState<{ key: string; hunk: number } | null>(null); // the hunk last jumped to
   const [since, setSince] = useState(false); // interdiff: only what changed since the previous head
+  const [showDesc, setShowDesc] = useState(false);
+  const [openAnswers, setOpenAnswers] = useState<Set<string>>(new Set()); // doubt ids whose inline answer is expanded
   const changedSet = useMemo(() => new Set(pr?.changedSince ?? []), [pr?.changedSince]);
   const agentRef = useRef<AgentHandle>(null);
   const commentRef = useRef<HTMLTextAreaElement>(null);
@@ -63,6 +66,14 @@ function Review({ prKey }: { prKey: string }) {
     });
     getTree(prKey).then((t) => setTree(t.paths));
   }, [prKey]);
+
+  // while an answer is pending, refresh the doubts from the daemon, which reads the session transcript
+  const pending = (pr?.doubts ?? []).some((d) => d.path && !d.done);
+  useEffect(() => {
+    if (!pending) return;
+    const t = setInterval(() => getPr(prKey).then((s) => setPr((p) => (p ? { ...p, doubts: s.doubts } : p))), 2000);
+    return () => clearInterval(t);
+  }, [pending, prKey]);
 
   useEffect(() => {
     if (!toast) return;
@@ -233,6 +244,7 @@ function Review({ prKey }: { prKey: string }) {
   const switchTab = useCallback((t: Tab) => {
     if (!pr) return;
     setTab(t);
+    if (t === 'doubts') return;
     if (t === 'commits') {
       const first = pr.chunks.find((c) => c.verdict === 'none') ?? pr.chunks[0];
       if (first) setView({ kind: 'commit', sha: first.sha });
@@ -385,18 +397,13 @@ function Review({ prKey }: { prKey: string }) {
     if (!agentRef.current?.activeTitle()) { setToast('open a session first (a)'); return; }
     const { path, rev, range } = commentTarget;
     const body = await textOf(rev, path);
-    const lines = body.split('\n');
-    const where = range ? (range.start === range.end ? `${path}:${range.start}` : `${path}:${range.start}-${range.end}`) : path;
-    const snippet = range ? lines.slice(range.start - 1, range.end).join('\n') : '';
-    const text = [
-      `Review comment on ${where} (PR #${pr.number} ${pr.owner}/${pr.repo}, head ${pr.headSha.slice(0, 7)})`,
-      ...(snippet ? ['```', snippet, '```'] : []),
-      comment.trim()
-    ].join('\n');
-    const ok = await agentRef.current.send(text);
+    const snippet = range ? body.split('\n').slice(range.start - 1, range.end).join('\n') : undefined;
+    const ok = await agentRef.current.send(prKey, { path, lines: range ?? undefined, question: comment.trim(), snippet });
     setToast(ok ? `sent to ${agentRef.current.activeTitle()}` : 'no active terminal');
     setComment(null);
-  }, [pr, commentTarget, comment, textOf]);
+    const fresh = await getPr(prKey);
+    setPr((p) => (p ? { ...p, doubts: fresh.doubts } : p));
+  }, [pr, prKey, commentTarget, comment, textOf]);
 
   // ---- sync on demand: refetch the head, keep marks for untouched files, show what changed -------
   const sync = useCallback(async () => {
@@ -455,7 +462,8 @@ function Review({ prKey }: { prKey: string }) {
       else if (e.key === 'n') void skipNoise();
       else if (e.key === 'e') setFullFile((v) => !v);
       else if (e.key === 'w') setSplit((v) => !v);
-      else if (e.key === 's') switchTab(tab === 'files' ? 'commits' : tab === 'commits' ? 'repo' : 'files');
+      else if (e.key === 's') switchTab(tab === 'files' ? 'commits' : tab === 'commits' ? 'repo' : tab === 'repo' ? 'doubts' : 'files');
+      else if (e.key === 'v') setShowDesc((x) => !x);
       else if (e.key === 'c' && tab === 'commits') {
         if (view?.kind === 'chunk') { const c = pr?.chunks.find((k) => k.id === view.id); if (c) setView({ kind: 'commit', sha: c.sha }); }
         else if (view?.kind === 'commit') { const c = pr?.chunks.find((k) => k.sha === view.sha); if (c) setView({ kind: 'chunk', id: c.id }); }
@@ -495,10 +503,29 @@ function Review({ prKey }: { prKey: string }) {
     onTokenClick: (p: { lineNumber: number; lineCharStart: number }, ev: MouseEvent) => tokenClick(path, p.lineNumber, p.lineCharStart, ev)
   }), [theme, tokenClick]);
 
-  const annotationsFor = useCallback((it: Item): DiffLineAnnotation<{ index: number }>[] =>
-    (hunksOf.get(it.key) ?? []).filter((h) => isHunkRead(it.key, h.index)).map((h) => (
-      h.newCount > 0 ? { side: 'additions' as const, lineNumber: h.newStart, metadata: { index: h.index } } : { side: 'deletions' as const, lineNumber: h.oldStart, metadata: { index: h.index } }
-    )), [hunksOf, isHunkRead]);
+  type Ann = { hunk?: number; doubt?: string };
+  const annotationsFor = useCallback((it: Item): DiffLineAnnotation<Ann>[] => {
+    const hunks: DiffLineAnnotation<Ann>[] = (hunksOf.get(it.key) ?? []).filter((h) => isHunkRead(it.key, h.index)).map((h) => (
+      h.newCount > 0 ? { side: 'additions' as const, lineNumber: h.newStart, metadata: { hunk: h.index } } : { side: 'deletions' as const, lineNumber: h.oldStart, metadata: { hunk: h.index } }
+    ));
+    const answers: DiffLineAnnotation<Ann>[] = (pr?.doubts ?? [])
+      .filter((d) => d.path === it.path && d.lines && !d.resolved)
+      .map((d) => ({ side: 'additions' as const, lineNumber: d.lines!.end, metadata: { doubt: d.id } }));
+    return [...hunks, ...answers];
+  }, [hunksOf, isHunkRead, pr?.doubts]);
+
+  const renderAnn = useCallback((a: DiffLineAnnotation<Ann>) => {
+    if (a.metadata.hunk !== undefined) return <div className="hunk-read">✓ hunk read</div>;
+    const d = pr?.doubts.find((x) => x.id === a.metadata.doubt);
+    if (!d) return null;
+    const open = openAnswers.has(d.id);
+    return (
+      <div className={`answer ${open ? 'open' : ''}`} onClick={() => setOpenAnswers((s) => { const n = new Set(s); n.has(d.id) ? n.delete(d.id) : n.add(d.id); return n; })}>
+        <div className="q">you: {d.question}</div>
+        {d.answer ? d.answer : <span className="wait">{d.done ? 'no answer' : 'waiting for the session…'}</span>}
+      </div>
+    );
+  }, [pr?.doubts, openAnswers]);
 
   // context expansion: pierre asks for both full sides when a collapsed region is opened, or at once in full-file mode
   function loaderFor(it: Item) {
@@ -535,10 +562,26 @@ function Review({ prKey }: { prKey: string }) {
           <button className={tab === 'files' ? 'on' : ''} onClick={() => switchTab('files')}>Changes</button>
           <button className={tab === 'commits' ? 'on' : ''} onClick={() => switchTab('commits')}>Commits</button>
           <button className={tab === 'repo' ? 'on' : ''} onClick={() => switchTab('repo')}>Repo</button>
+          <button className={tab === 'doubts' ? 'on' : ''} onClick={() => switchTab('doubts')}>Doubts{pr.doubts.filter((d) => d.path && !d.resolved).length ? ` ${pr.doubts.filter((d) => d.path && !d.resolved).length}` : ''}</button>
           <span className="hint"><kbd>s</kbd> <kbd>p</kbd> <kbd>g</kbd> <kbd>o</kbd></span>
         </div>
-        {tab === 'files' && <Tree paths={pr.files.map((f) => f.path)} meta={fileByPath} readFiles={pr.readFiles} changed={changedSet} current={currentPath} onPick={(p) => openPath(p)} />}
+        {tab === 'files' && <Tree paths={pr.files.map((f) => f.path)} meta={fileByPath} readFiles={pr.readFiles} changed={changedSet} signals={pr.signals} current={currentPath} onPick={(p) => openPath(p)} />}
         {tab === 'repo' && (tree.length ? <Tree paths={tree} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={(p) => openPath(p)} repo /> : <div className="empty">loading tree…</div>)}
+        {tab === 'doubts' && (
+          <div className="doubts">
+            {pr.doubts.filter((d) => d.path).length === 0 && <div className="empty">no doubts yet: select lines, <kbd>d</kbd>, write, <kbd>⌘enter</kbd></div>}
+            {[...pr.doubts].filter((d) => d.path).reverse().map((d) => (
+              <div key={d.id} className={`doubt ${d.resolved ? 'resolved' : ''} ${openAnswers.has(d.id) ? 'open' : ''}`} onClick={() => { openPath(d.path!, d.lines?.start); setOpenAnswers((s) => new Set(s).add(d.id)); }}>
+                <div className="where">
+                  <input type="checkbox" checked={!!d.resolved} title="resolved: I understand this now" onClick={(e) => e.stopPropagation()} onChange={async (e) => { await resolveDoubt(prKey, d.id, e.target.checked); setPr((p) => (p ? { ...p, doubts: p.doubts.map((x) => (x.id === d.id ? { ...x, resolved: e.target.checked } : x)) } : p)); }} />
+                  <span>{d.path}{d.lines ? `:${d.lines.start}${d.lines.end !== d.lines.start ? `-${d.lines.end}` : ''}` : ''}</span>
+                </div>
+                <div className="q">{d.question}</div>
+                {d.answer ? <div className="a">{d.answer}</div> : <div className="wait">{d.done ? 'no answer recorded' : 'waiting for the session…'}</div>}
+              </div>
+            ))}
+          </div>
+        )}
         {tab === 'commits' && pr.commits.map((c) => {
           const mine = pr.chunks.filter((k) => k.sha === c.sha);
           const done = mine.length > 0 && mine.every((k) => k.verdict !== 'none');
@@ -570,7 +613,14 @@ function Review({ prKey }: { prKey: string }) {
               : head
                 ? <><span className="path">{head.path}</span><span>{head.oldRev === 'base' ? (since && changedSet.has(head.path) ? `since ${pr.prevHeadSha?.slice(0, 7)}` : 'vs merge-base') : head.newRev.slice(0, 7)} · {head.status} · +{head.adds}/-{head.dels}{head.read ? ' · read' : ''}{changedSet.has(head.path) ? <> · changed since your read, <kbd>i</kbd> {since ? 'whole diff' : 'only what changed'}</> : null}</span></>
                 : <span>nothing left to read</span>}
+          {head && (pr.signals?.[head.path] ?? []).length > 0 && (
+            <span className="sigline">{(pr.signals?.[head.path] ?? []).map((x) => {
+              const note = x.kind === 'owners' ? x.note.split(' ').slice(0, 2).join(' ') + (x.note.split(' ').length > 2 ? ` +${x.note.split(' ').length - 2}` : '') : x.note;
+              return <span key={x.kind} title={x.note}><b>{x.kind}</b> {note} &nbsp;</span>;
+            })}</span>
+          )}
           <span className="keys">
+            <kbd>v</kbd> {showDesc ? 'hide' : 'desc'} &nbsp;
             <kbd>u</kbd> read &nbsp; <kbd>x</kbd> unmark &nbsp; <kbd>j</kbd>/<kbd>k</kbd> move &nbsp;
             <kbd>e</kbd> {fullFile ? 'hunks only' : 'full file'} &nbsp; <kbd>w</kbd> {split ? 'unified' : 'split'} &nbsp;
             <kbd>space</kbd> hunk{flatHunks.length ? ` ${cursor ? flatHunks.findIndex((x) => x.key === cursor.key && x.hunk.index === cursor.hunk) + 1 : 0}/${flatHunks.length}` : ''} &nbsp; <kbd>m</kbd> mark &nbsp; <kbd>b</kbd> history &nbsp;
@@ -578,6 +628,13 @@ function Review({ prKey }: { prKey: string }) {
             {tab === 'commits' && <> &nbsp; <kbd>c</kbd> {view?.kind === 'commit' ? 'one file' : 'whole commit'} &nbsp; <kbd>[</kbd>/<kbd>]</kbd> file</>}
           </span>
         </div>
+        {showDesc && (
+          <div className="desc">
+            {pr.body?.trim()
+              ? <div dangerouslySetInnerHTML={{ __html: marked.parse(pr.body, { async: false }) as string }} />
+              : <div className="empty">this PR has no description</div>}
+          </div>
+        )}
         <div className="diff" ref={diffRef}>
           {view?.kind === 'repo' && (repoFile
             ? <div className="stack"><PierreFile file={{ name: repoFile.path, contents: repoFile.contents }} options={fileOptionsFor(repoFile.path)} selectedLines={sel?.key === repoFile.path ? sel.range : null} disableWorkerPool /></div>
@@ -587,7 +644,7 @@ function Review({ prKey }: { prKey: string }) {
             <div key={it.key} className={`stack ${it.read ? 'understood' : ''}`} data-key={it.key}>
               {patches[it.key] !== undefined
                 ? patches[it.key].trim()
-                  ? <PatchDiff<{ index: number }> key={`${it.key}:${fullFile}:${split}`} patch={patches[it.key]} options={diffOptionsFor(it)} selectedLines={sel?.key === it.key ? sel.range : null} lineAnnotations={annotationsFor(it)} renderAnnotation={() => <div className="hunk-read">✓ hunk read</div>} disableWorkerPool />
+                  ? <PatchDiff<Ann> key={`${it.key}:${fullFile}:${split}`} patch={patches[it.key]} options={diffOptionsFor(it)} selectedLines={sel?.key === it.key ? sel.range : null} lineAnnotations={annotationsFor(it)} renderAnnotation={renderAnn} disableWorkerPool />
                   : <div className="empty">{it.path}: no textual diff (binary or empty)</div>
                 : <div className="empty">loading {it.path}…</div>}
             </div>

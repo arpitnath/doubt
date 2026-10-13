@@ -21,12 +21,22 @@ export interface Chunk {
 
 export interface Doubt {
   id: string;
-  chunkId: string;
+  chunkId: string; // legacy from the first version; new doubts use `path`
+  path?: string;
   lines?: { start: number; end: number };
   question: string;
   answer: string;
   at: number;
+  // anchored answers from a terminal session: which transcript to watch and what to look for in it
+  termCwd?: string;
+  sessionId?: string;
+  marker?: string;
+  termStartedAt?: number;
+  done?: boolean;
+  resolved?: boolean;
 }
+
+export interface Signal { kind: 'rewritten' | 'tests' | 'deps' | 'todo' | 'dup' | 'sensitive' | 'owners'; note: string }
 
 export interface PrState {
   url: string;
@@ -50,6 +60,8 @@ export interface PrState {
   hunkMarks?: Record<string, number[]>; // item key (path, or chunk id) -> indexes of hunks marked read
   prevHeadSha?: string; // the head before the last sync that changed it; enables per-file interdiff
   changedSince?: string[]; // files whose content changed at that sync
+  signals?: Record<string, Signal[]>; // attention markers per file, facts only
+  body?: string; // the PR description, as written on GitHub
   doubts: Doubt[];
 }
 

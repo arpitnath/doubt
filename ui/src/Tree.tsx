@@ -2,7 +2,7 @@
 // folders collapsible. Changed files carry status, counts, a kind badge and a read mark; in repo
 // mode unchanged files are listed too, muted, and only the directories holding changes start open.
 import { useMemo, useState, type ReactElement } from 'react';
-import { isNoise, type PrFile } from './api';
+import { isNoise, type PrFile, type Signal } from './api';
 
 interface Dir { name: string; dirs: Map<string, Dir>; files: string[] }
 
@@ -38,18 +38,20 @@ function compress(d: Dir): Dir {
 }
 
 const BADGE: Partial<Record<PrFile['kind'], string>> = { lock: 'lock', generated: 'gen', snapshot: 'snap', docs: 'docs', config: 'cfg', test: 'test' };
+const SIG: Record<Signal['kind'], string> = { rewritten: '↻', tests: '−t', deps: '+dep', todo: 'todo', dup: '=', sensitive: '!', owners: '' };
 
 interface Props {
   paths: string[]; // every path to show
   meta: Map<string, PrFile>; // changed files, by path
   readFiles: Record<string, string>;
   changed?: Set<string>; // files whose content changed at the last sync
+  signals?: Record<string, Signal[]>; // attention markers, facts only
   current: string | null;
   onPick: (path: string) => void;
   repo?: boolean; // repo mode: start folded except where changes live
 }
 
-export function Tree({ paths, meta, readFiles, changed, current, onPick, repo = false }: Props) {
+export function Tree({ paths, meta, readFiles, changed, signals, current, onPick, repo = false }: Props) {
   const root = useMemo(() => compress(build(paths)), [paths]);
 
   // keys of directories that hold a changed file, so repo mode opens only those
@@ -96,6 +98,7 @@ export function Tree({ paths, meta, readFiles, changed, current, onPick, repo = 
           <span className="status">{f ? f.status : ''}</span>
           <span className="name">{name}</span>
           {f && changed?.has(path) && <span className="badge new">new</span>}
+          {f && (signals?.[path] ?? []).filter((x) => x.kind !== 'owners').map((x) => <span key={x.kind} className={`badge sig ${x.kind}`} title={x.note}>{SIG[x.kind]}</span>)}
           {f?.wsOnly && <span className="badge">ws</span>}
           {f && !f.wsOnly && BADGE[f.kind] && <span className="badge">{BADGE[f.kind]}</span>}
           {f && <span className="stat">+{f.adds}/-{f.dels}</span>}

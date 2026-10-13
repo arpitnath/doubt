@@ -5,12 +5,19 @@ export type FileKind = 'src' | 'test' | 'docs' | 'config' | 'generated' | 'snaps
 export interface Commit { sha: string; subject: string; author: string; parents: string[]; merge: boolean }
 export interface Chunk { id: string; sha: string; path: string; status: string; adds: number; dels: number; verdict: Verdict }
 export interface PrFile { path: string; oldPath?: string; status: string; adds: number; dels: number; oldBlob: string; newBlob: string; kind: FileKind; wsOnly: boolean }
+export interface Signal { kind: 'rewritten' | 'tests' | 'deps' | 'todo' | 'dup' | 'sensitive' | 'owners'; note: string }
+export interface Doubt {
+  id: string; chunkId: string; path?: string; lines?: { start: number; end: number }; question: string; answer: string; at: number;
+  sessionId?: string; done?: boolean; resolved?: boolean;
+}
 export interface PrState {
   url: string; owner: string; repo: string; number: number; title: string; author: string;
   headSha: string; baseSha: string; baseRef: string; dir: string;
   commits: Commit[]; chunks: Chunk[]; files: PrFile[]; readFiles: Record<string, string>; hunkMarks?: Record<string, number[]>;
-  prevHeadSha?: string; changedSince?: string[]; busy: boolean;
+  prevHeadSha?: string; changedSince?: string[]; signals?: Record<string, Signal[]>; body?: string; doubts: Doubt[]; busy: boolean;
 }
+export const resolveDoubt = (key: string, id: string, resolved: boolean): Promise<unknown> =>
+  fetch('/api/agent/resolve', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pr: key, id, resolved }) }).then((r) => ok(r));
 export interface KnownPr { key: string; url: string; owner: string; repo: string; number: number; title: string; author: string; read: number; files: number; open: boolean; updated: number }
 
 const q = (key: string, rest = '') => `?pr=${encodeURIComponent(key)}${rest}`;

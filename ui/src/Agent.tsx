@@ -6,8 +6,8 @@ import '@xterm/xterm/css/xterm.css';
 import { agentSessions, agentTerms, closeAgentTerm, openAgentTerm, type AgentSession, type TermInfo } from './api';
 
 export interface AgentHandle {
-  /** text typed into the active terminal, submitted with Enter; false when no terminal is active */
-  send(text: string): Promise<boolean>;
+  /** a review comment delivered to the active terminal and recorded as a doubt; false when no terminal is active */
+  send(pr: string, comment: { path: string; lines?: { start: number; end: number }; question: string; snippet?: string }): Promise<boolean>;
   activeTitle(): string | null;
 }
 
@@ -43,9 +43,9 @@ export const Agent = forwardRef<AgentHandle, Props>(function Agent({ workdir, wo
   }, []);
 
   useImperativeHandle(ref, () => ({
-    async send(text: string) {
+    async send(pr, comment) {
       if (!active) return false;
-      const r = await fetch(`/api/agent/write`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: active, text, submit: true }) });
+      const r = await fetch(`/api/agent/write`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: active, pr, comment }) });
       return r.ok;
     },
     activeTitle() { return terms.find((t) => t.id === active)?.title ?? null; }

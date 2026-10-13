@@ -52,6 +52,10 @@ export function openTerm(opts: { sessionId?: string; cwd: string; title: string 
   return term.info;
 }
 
+export function getTerm(id: string): TermInfo | undefined {
+  return terms.get(id)?.info;
+}
+
 export function listTerms(): TermInfo[] {
   return [...terms.values()].map((t) => t.info).sort((a, b) => a.startedAt - b.startedAt);
 }

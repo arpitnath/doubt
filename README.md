@@ -41,7 +41,13 @@ Select lines by clicking line numbers; that selection is what `y`, `Y` and the o
 | `y` / `Y` | copy `path:line` for the selected lines, or a fenced snippet with context |
 | `⌘`click | go to definition of a token; `⌘⌥`click lists its references (TypeScript and JavaScript, built on first use) |
 | `a` | open or hide the agent sidebar |
-| `d` | review comment on the selected lines, sent to the active session with `⌘enter` |
+| `d` | review comment on the selected lines, sent to the active session with `⌘enter`; the answer comes back under those lines and in the Doubts tab |
+| `space` / `⇧space` | next / previous hunk |
+| `m` | mark the current hunk read; a fully marked file becomes read |
+| `b` | who last touched the selected lines, with PR numbers |
+| `r` | sync: refetch the head on demand, keep marks for untouched files, badge what changed |
+| `i` | for a file that changed since your read: only what changed, or the whole diff |
+| `v` | show or hide the PR description |
 | `e` | whole file with inline hunks, or hunks only |
 | `w` | split or unified |
 | `c` | in Commits: whole commit or one file |
@@ -51,7 +57,9 @@ Select lines by clicking line numbers; that selection is what `y`, `Y` and the o
 
 `a` opens the agent sidebar. It lists your Claude Code sessions from every project, with summary, directory, branch and last activity. Click one and that session resumes in a real terminal inside the page, the same CLI you run in a shell, with every prompt and slash command intact. Or start a new session in the PR checkout. Several can be open as tabs; they survive page reloads while the daemon runs.
 
-**Review comments to the agent.** Select lines in any file, press `d`, write, `⌘enter`. The comment lands in the active session as a message carrying the file, the line range, the PR and head SHA, and the selected code. GitHub's gesture, with the agent as the recipient.
+**Review comments to the agent.** Select lines in any file, press `d`, write, `⌘enter`. The comment lands in the active session as a message carrying the file, the line range, the PR and head SHA, and the selected code. GitHub's gesture, with the agent as the recipient. The answer is read back from the session's transcript on disk, never from the terminal stream, and shown under the lines it is about and in the **Doubts** tab, where each doubt can be ticked resolved once you understand.
+
+**Signals, never grades.** Small markers in the tree for facts worth a look first: a file rewritten by more than one commit in the PR (↻), test or assertion lines removed (−t), dependency lines added (+dep), TODO or FIXME added, the same block added in two places (=), a sensitive path (!), and the CODEOWNERS area in the file bar. A `.doubt.json` in the repo with `{ "sensitive": [...] }` extends the sensitive list.
 
 It is a cloud-shell architecture: a pseudo-terminal on the daemon (`node-pty`), `xterm.js` in the browser, a WebSocket between. Nothing of the CLI is re-implemented. The nested session gets a clean environment so it never thinks it is running inside another Claude Code.
 

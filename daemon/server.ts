@@ -11,7 +11,10 @@ import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, commitD
 import { Lang } from './lang.js';
 import { WebSocketServer } from 'ws';
 import { listSessions } from '@anthropic-ai/claude-agent-sdk';
-import { openTerm, listTerms, closeTerm, writeTerm, attach, closeAll } from './term.js';
+import { openTerm, listTerms, closeTerm, writeTerm, attach, closeAll, getTerm } from './term.js';
+import { computeSignals } from './signals.js';
+import { transcriptFor, answerTo, sessionIdOf } from './transcript.js';
+import { readFileSync as readText } from 'node:fs';
 import { ghToken, prMeta } from './github.js';
 import { load, save, carryOver, stateKey, WORK_ROOT, STATE_ROOT, type PrState, type Chunk, type Verdict } from './state.js';
 import { ask, sessionsFor, shapePrompt, doubtPrompt, commitDoubtPrompt, takePrompt, type AgentEvent } from './agent.js';
@@ -49,6 +52,8 @@ async function openPr(url: string, force = false): Promise<Open> {
     let state: PrState;
     if (prev && prev.headSha === meta.headSha && prev.files) {
       state = prev;
+      if (!state.signals) { state.signals = computeSignals(co.dir, readText(state.diffFile, 'utf8'), state.chunks); save(state); }
+      if (state.body === undefined) { state.body = meta.body; save(state); }
       console.error(`> ${force ? 'synced, head unchanged' : 'resumed'}: ${Object.keys(state.readFiles).length}/${state.files.length} files read`);
     } else {
       const list = await commits(co.dir, co.baseSha, meta.headSha);
@@ -68,7 +73,8 @@ async function openPr(url: string, force = false): Promise<Open> {
         title: meta.title, author: meta.author,
         headSha: meta.headSha, baseSha: co.baseSha, baseRef: meta.baseRef,
         dir: co.dir, diffFile, commits: list, chunks, files, readFiles: {}, doubts: prev?.doubts ?? [],
-        hunkMarks: {}, prevHeadSha: prev?.headSha, changedSince,
+        hunkMarks: {}, prevHeadSha: prev?.headSha, changedSince, body: meta.body,
+        signals: computeSignals(co.dir, readText(diffFile, 'utf8'), chunks),
         sessionId: prev?.sessionId, forkedFrom: prev?.forkedFrom, shape: prev?.shape
       };
       carryOver(state, prev);
@@ -195,8 +201,39 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
   if (req.method === 'POST' && url.pathname === '/api/agent/write') {
     const body = await readJson(req);
-    const ok = writeTerm(String(body.id || ''), String(body.text || ''), body.submit !== false);
-    return ok ? json(res, 200, { ok: true }) : json(res, 404, { error: 'no such terminal, or it exited' });
+    const termId = String(body.id || '');
+    const term = getTerm(termId);
+    if (!term || !term.alive) return json(res, 404, { error: 'no such terminal, or it exited' });
+    // plain text: typed as-is. a comment: composed here so the record and the message carry the same marker
+    const c = body.comment as { path: string; lines?: { start: number; end: number }; question: string; snippet?: string } | undefined;
+    const prKey = typeof body.pr === 'string' ? body.pr : '';
+    const o = prKey ? open.get(prKey) : undefined;
+    if (!c || !o) {
+      const ok = writeTerm(termId, String(body.text || ''), body.submit !== false);
+      return ok ? json(res, 200, { ok: true }) : json(res, 404, { error: 'no such terminal, or it exited' });
+    }
+    const st = o.state;
+    const id = Date.now().toString(36);
+    const marker = `[doubt ${id}]`;
+    const where = c.lines ? (c.lines.start === c.lines.end ? `${c.path}:${c.lines.start}` : `${c.path}:${c.lines.start}-${c.lines.end}`) : c.path;
+    const text = [
+      `Review comment on ${where} (PR #${st.number} ${st.owner}/${st.repo}, head ${st.headSha.slice(0, 7)}) ${marker}`,
+      ...(c.snippet ? ['```', c.snippet, '```'] : []),
+      c.question.trim()
+    ].join('\n');
+    st.doubts.push({ id, chunkId: '', path: c.path, lines: c.lines, question: c.question.trim(), answer: '', at: Date.now(), termCwd: term.cwd, sessionId: term.sessionId, marker, termStartedAt: term.startedAt, done: false });
+    save(st);
+    writeTerm(termId, text, true);
+    return json(res, 200, { ok: true, doubt: id });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/agent/resolve') {
+    const body = await readJson(req);
+    const o = open.get(String(body.pr || ''));
+    const d = o?.state.doubts.find((x) => x.id === body.id);
+    if (!o || !d) return json(res, 404, { error: 'unknown doubt' });
+    d.resolved = body.resolved !== false;
+    save(o.state);
+    return json(res, 200, { ok: true });
   }
 
   if (!url.pathname.startsWith('/api/')) return req.method === 'GET' ? serveStatic(res, url.pathname) : json(res, 404, { error: 'not found' });
@@ -387,6 +424,23 @@ const server = createServer((req, res) => {
     else res.end();
   });
 });
+
+// answers for pending doubts, read from the sessions' transcripts on disk
+setInterval(() => {
+  for (const [, o] of open) {
+    let dirty = false;
+    for (const d of o.state.doubts) {
+      if (d.done || !d.marker || !d.termCwd) continue;
+      const file = transcriptFor(d.termCwd, d.sessionId, d.termStartedAt ?? 0);
+      if (!file) continue;
+      if (!d.sessionId) { d.sessionId = sessionIdOf(file); dirty = true; }
+      const a = answerTo(file, d.marker);
+      if (!a) continue;
+      if (a.text !== d.answer || a.done !== d.done) { d.answer = a.text; d.done = a.done; dirty = true; }
+    }
+    if (dirty) save(o.state);
+  }
+}, 1500).unref();
 
 const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
