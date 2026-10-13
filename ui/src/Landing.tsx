@@ -42,7 +42,7 @@ export function Landing({ onOpen }: { onOpen: (key: string) => void }) {
                 <span className="num">#{p.number}</span>
                 <span className="title">{p.title}</span>
                 <span className="meta">{p.owner}/{p.repo} · {p.author}</span>
-                <span className="progress">{p.files ? `${p.read} of ${p.files} files read` : 'open to load'}{p.open ? ' · open now' : ''}</span>
+                <span className="progress">{progress(p)}{p.open ? ' · open now' : ''}</span>
               </div>
             ))}
           </div>
@@ -50,4 +50,11 @@ export function Landing({ onOpen }: { onOpen: (key: string) => void }) {
       </div>
     </div>
   );
+}
+
+function progress(p: KnownPr): string {
+  if (!p.files) return 'open to load';
+  if (p.read === 0) return `${p.files} file${p.files === 1 ? '' : 's'}, none read`;
+  if (p.read >= p.files) return `all ${p.files} file${p.files === 1 ? '' : 's'} read`;
+  return `${p.read} of ${p.files} files read`;
 }
