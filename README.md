@@ -40,14 +40,22 @@ Select lines by clicking line numbers; that selection is what `y`, `Y` and the o
 | `o` | outline of the file in focus: functions, classes, types, tests; Enter jumps |
 | `y` / `Y` | copy `path:line` for the selected lines, or a fenced snippet with context |
 | `⌘`click | go to definition of a token; `⌘⌥`click lists its references (TypeScript and JavaScript, built on first use) |
+| `a` | open or hide the agent sidebar |
+| `d` | review comment on the selected lines, sent to the active session with `⌘enter` |
 | `e` | whole file with inline hunks, or hunks only |
 | `w` | split or unified |
 | `c` | in Commits: whole commit or one file |
 | `[` / `]` | in a stacked commit: jump between files |
 
-## Claude session
+## Claude Code in the page
 
-Out of the UI for now. The daemon still serves `/api/sessions`, `/api/session` (fork or fresh, returns the PR's shape) and `/api/doubt` (a question or a `take` on a file or commit), all streaming over SSE, so the room can come back when the session flow is right.
+`a` opens the agent sidebar. It lists your Claude Code sessions from every project, with summary, directory, branch and last activity. Click one and that session resumes in a real terminal inside the page, the same CLI you run in a shell, with every prompt and slash command intact. Or start a new session in the PR checkout. Several can be open as tabs; they survive page reloads while the daemon runs.
+
+**Review comments to the agent.** Select lines in any file, press `d`, write, `⌘enter`. The comment lands in the active session as a message carrying the file, the line range, the PR and head SHA, and the selected code. GitHub's gesture, with the agent as the recipient.
+
+It is a cloud-shell architecture: a pseudo-terminal on the daemon (`node-pty`), `xterm.js` in the browser, a WebSocket between. Nothing of the CLI is re-implemented. The nested session gets a clean environment so it never thinks it is running inside another Claude Code.
+
+The older SSE question endpoints (`/api/session`, `/api/doubt`) still exist, unused.
 
 ## Layout
 

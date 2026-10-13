@@ -42,10 +42,15 @@ A reading tool for pull requests at agent volume. You walk a PR one piece at a t
 
 - Copy `path:line-line` of the selected lines, or a fenced snippet with three lines of context, for pasting into a terminal, a comment or an agent.
 
+**Claude Code in the page**
+
+- `a` opens the agent sidebar: every Claude Code session on the machine, with summary, directory, branch and last activity. Click one and it resumes in a real terminal inside the page, the same CLI as in a shell, nothing re-implemented. Or start a new session in the PR checkout. Several run as tabs and survive page reloads.
+- Review comments to the agent: select lines, `d`, write, `⌘enter`. The comment lands in the active session with the file, line range, PR, head SHA and the selected code.
+
 **Not in the tool, on purpose**
 
 - Nothing is posted to GitHub. CI, merge and the formal approval stay there.
-- No Claude in the UI for now. The daemon still has the session and question endpoints from the first version, unused, for when that flow is redesigned.
+- The agent never reads for you: nothing runs unasked, nothing marks a file read, nothing grades the PR.
 
 ## 2. How to use it
 
@@ -86,6 +91,8 @@ Paste a PR URL, or click one you opened before. First time on a repo takes 20 to
 | `y` / `Y` | copy `path:line` for the selected lines, or a fenced snippet with context |
 | `⌘` click | go to definition of a token |
 | `⌘⌥` click | list references of a token |
+| `a` | open or hide the agent sidebar |
+| `d` | review comment on the selected lines; `⌘enter` sends it to the active session |
 | `Esc` | close any palette |
 
 Select lines by clicking a line number and dragging. That selection is what `y`, `Y` and the outline treat as the file in focus; in a stacked commit it also picks which file they mean.
@@ -109,7 +116,7 @@ The tool is built around one rule: approve means understood, not verified. Corre
 
 **When a push arrives.** Open the PR again. Files whose content did not change stay read. The unread set is exactly what is new. Read those, done.
 
-**Taking a doubt to the dev or an agent.** Select the lines, `Y`, paste. The snippet carries the path, the line range and the context, so the question needs no setup.
+**Taking a doubt to the agent.** Press `a`, open the session that knows this repo, or a new one in the PR checkout. Then select the lines, `d`, write what you do not get, `⌘enter`. The question arrives in that session with the file, the lines and the code, and the answer streams in the terminal beside the diff. Keep reading while it works. For a dev instead of an agent, `Y` copies the same snippet for a GitHub comment.
 
 **What to skip without guilt.** Everything `n` clears. Anything in the Repo tab you opened only for context. Tests until the source they test is understood.
 

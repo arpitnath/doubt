@@ -3,6 +3,7 @@ import { PatchDiff, File as PierreFile, type FileDiffMetadata, type FileDiffLoad
 import { definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, isNoise, outline, readingOrder, references, search, setVerdict, type Chunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
 import { Tree } from './Tree';
 import { Landing } from './Landing';
+import { Agent, type AgentHandle } from './Agent';
 
 // hash routing, nothing more: #/ is the landing page, #/pr/<key> is a review
 function useHash(): string {
@@ -42,6 +43,10 @@ function Review({ prKey }: { prKey: string }) {
   const [sel, setSel] = useState<{ key: string; range: SelectedLineRange } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [palette, setPalette] = useState<{ mode: PaletteMode; query: string; rows: Row[]; title?: string } | null>(null);
+  const [agentOpen, setAgentOpen] = useState(false);
+  const [comment, setComment] = useState<string | null>(null); // the review comment being written, null when closed
+  const agentRef = useRef<AgentHandle>(null);
+  const commentRef = useRef<HTMLTextAreaElement>(null);
   const [paletteIdx, setPaletteIdx] = useState(0);
   const diffRef = useRef<HTMLDivElement>(null);
   const textCache = useRef(new Map<string, string>()); // `${rev}:${path}` -> contents
@@ -307,10 +312,41 @@ function Review({ prKey }: { prKey: string }) {
     setToast(`copied ${withContext ? 'with context' : ref}`);
   }, [focus, sel, textOf]);
 
+  // ---- review comment to the active agent session (GitHub's gesture, the agent as recipient) --
+  const commentTarget = useMemo(() => {
+    if (!focus) return null;
+    const range = sel && sel.key === focus.key ? { start: Math.min(sel.range.start, sel.range.end), end: Math.max(sel.range.start, sel.range.end) } : null;
+    return { path: focus.path, rev: focus.rev, range };
+  }, [focus, sel]);
+
+  const sendComment = useCallback(async () => {
+    if (!pr || !commentTarget || !comment?.trim()) return;
+    if (!agentRef.current?.activeTitle()) { setToast('open a session first (a)'); return; }
+    const { path, rev, range } = commentTarget;
+    const body = await textOf(rev, path);
+    const lines = body.split('\n');
+    const where = range ? (range.start === range.end ? `${path}:${range.start}` : `${path}:${range.start}-${range.end}`) : path;
+    const snippet = range ? lines.slice(range.start - 1, range.end).join('\n') : '';
+    const text = [
+      `Review comment on ${where} (PR #${pr.number} ${pr.owner}/${pr.repo}, head ${pr.headSha.slice(0, 7)})`,
+      ...(snippet ? ['```', snippet, '```'] : []),
+      comment.trim()
+    ].join('\n');
+    const ok = await agentRef.current.send(text);
+    setToast(ok ? `sent to ${agentRef.current.activeTitle()}` : 'no active terminal');
+    setComment(null);
+  }, [pr, commentTarget, comment, textOf]);
+
   // ---- keys ---------------------------------------------------------------------------------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const typing = (e.target as HTMLElement)?.tagName === 'INPUT';
+      const tag = (e.target as HTMLElement)?.tagName;
+      const typing = tag === 'INPUT' || tag === 'TEXTAREA' || !!(e.target as HTMLElement)?.closest?.('.xterm');
+      if (comment !== null) {
+        if (e.key === 'Escape') setComment(null);
+        else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void sendComment(); }
+        return;
+      }
       if (palette) {
         if (e.key === 'Escape') setPalette(null);
         else if (e.key === 'ArrowDown') { e.preventDefault(); setPaletteIdx((i) => Math.min(i + 1, Math.max(0, paletteRows.length - 1))); }
@@ -324,7 +360,9 @@ function Review({ prKey }: { prKey: string }) {
       if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); void openPalette('search'); return; }
       if (mod && e.shiftKey && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); void openPalette('outline'); return; }
       if (mod || e.altKey) return;
-      if (e.key === 'p') { e.preventDefault(); void openPalette('open'); } // preventDefault: the p must not land in the input that autofocuses
+      if (e.key === 'a') { e.preventDefault(); setAgentOpen((v) => !v); }
+      else if (e.key === 'd') { e.preventDefault(); if (!commentTarget) { setToast('open a file first'); return; } setComment(''); setTimeout(() => commentRef.current?.focus(), 0); }
+      else if (e.key === 'p') { e.preventDefault(); void openPalette('open'); } // preventDefault: the p must not land in the input that autofocuses
       else if (e.key === 'g') { e.preventDefault(); void openPalette('search'); }
       else if (e.key === 'o') { e.preventDefault(); void openPalette('outline'); }
       else if (e.key === 'y') void copyRef(false);
@@ -346,7 +384,7 @@ function Review({ prKey }: { prKey: string }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [judge, skipNoise, switchTab, move, jumpStack, openPalette, pickRow, copyRef, tab, view, pr, palette, paletteRows, paletteIdx]);
+  }, [judge, skipNoise, switchTab, move, jumpStack, openPalette, pickRow, copyRef, sendComment, commentTarget, comment, tab, view, pr, palette, paletteRows, paletteIdx]);
 
   // ---- render -------------------------------------------------------------------------------------
   const theme = useMemo(() => ({ dark: 'github-dark' as const, light: 'github-light' as const }), []);
@@ -396,7 +434,7 @@ function Review({ prKey }: { prKey: string }) {
   const currentPath = view?.kind === 'file' || view?.kind === 'repo' ? view.path : null;
 
   return (
-    <div className="app two" tabIndex={-1} ref={(el) => { if (el && !el.contains(document.activeElement)) el.focus(); }} style={{ outline: 'none' }}>
+    <div className={`app ${agentOpen ? 'three' : 'two'}`} tabIndex={-1} ref={(el) => { if (el && !el.contains(document.activeElement)) el.focus(); }} style={{ outline: 'none' }}>
       <div className="top">
         <a className="home" href="#/" title="all pull requests">doubt</a>
         <span className="title">#{pr.number} {pr.title}</span>
@@ -435,7 +473,7 @@ function Review({ prKey }: { prKey: string }) {
         })}
       </div>
 
-      <div className="main">
+      <div className="main" onMouseDown={(e) => { if (!(e.target as HTMLElement).closest('input,textarea')) (e.currentTarget.closest('.app') as HTMLElement | null)?.focus(); }}>
         <div className="bar">
           {view?.kind === 'repo'
             ? <><span className="path">{view.path}</span><span>at PR head · not changed by this PR</span></>
@@ -447,7 +485,7 @@ function Review({ prKey }: { prKey: string }) {
           <span className="keys">
             <kbd>u</kbd> read &nbsp; <kbd>x</kbd> unmark &nbsp; <kbd>j</kbd>/<kbd>k</kbd> move &nbsp;
             <kbd>e</kbd> {fullFile ? 'hunks only' : 'full file'} &nbsp; <kbd>w</kbd> {split ? 'unified' : 'split'} &nbsp;
-            <kbd>y</kbd> ref &nbsp; <kbd>⌘</kbd>click def
+            <kbd>y</kbd> ref &nbsp; <kbd>⌘</kbd>click def &nbsp; <kbd>d</kbd> comment &nbsp; <kbd>a</kbd> agent
             {tab === 'commits' && <> &nbsp; <kbd>c</kbd> {view?.kind === 'commit' ? 'one file' : 'whole commit'} &nbsp; <kbd>[</kbd>/<kbd>]</kbd> file</>}
           </span>
         </div>
@@ -494,6 +532,15 @@ function Review({ prKey }: { prKey: string }) {
                 ))}
             </div>
           </div>
+        </div>
+      )}
+      {agentOpen && <Agent ref={agentRef} workdir={pr.dir} workdirLabel={`${pr.repo}#${pr.number}`} onClose={() => setAgentOpen(false)} />}
+
+      {comment !== null && commentTarget && (
+        <div className="comment" style={{ right: agentOpen ? 540 : 24, bottom: 24 }}>
+          <div className="ref">{commentTarget.range ? `${commentTarget.path}:${commentTarget.range.start}-${commentTarget.range.end}` : commentTarget.path}</div>
+          <textarea ref={commentRef} rows={4} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="what should the agent look at here?" />
+          <div className="to">to <b>{agentRef.current?.activeTitle() ?? 'no session open, press a'}</b> · <kbd>⌘</kbd><kbd>enter</kbd> send · <kbd>esc</kbd> cancel</div>
         </div>
       )}
       {toast && <div className="toast">{toast}</div>}

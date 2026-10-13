@@ -83,6 +83,16 @@ export type VerdictTarget = { chunkId: string } | { sha: string } | { path: stri
 export const setVerdict = (key: string, target: VerdictTarget, verdict: Verdict): Promise<{ ok: boolean; readFiles: Record<string, string> }> =>
   fetch(`/api/verdict${q(key)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...target, verdict }) }).then((r) => ok(r));
 
+// agent sidebar: sessions on disk, terminals running here
+export interface AgentSession { sessionId: string; cwd?: string; gitBranch?: string; summary: string; lastModified: number; fileSize?: number }
+export interface TermInfo { id: string; sessionId?: string; cwd: string; title: string; startedAt: number; alive: boolean }
+export const agentSessions = (): Promise<{ sessions: AgentSession[] }> => fetch('/api/agent/sessions').then((r) => ok(r));
+export const agentTerms = (): Promise<{ terms: TermInfo[] }> => fetch('/api/agent/terms').then((r) => ok(r));
+export const openAgentTerm = (body: { sessionId?: string; cwd: string; title: string }): Promise<{ term: TermInfo }> =>
+  fetch('/api/agent/open', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => ok(r));
+export const closeAgentTerm = (id: string): Promise<unknown> =>
+  fetch('/api/agent/close', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) }).then((r) => ok(r));
+
 // fuzzy open, px0-style scoring in miniature: subsequence match, bonus at path boundaries, shorter paths win
 export function fuzzy(query: string, paths: string[], limit = 20): string[] {
   const qq = query.toLowerCase().replace(/\s+/g, '');

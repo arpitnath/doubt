@@ -9,6 +9,9 @@ import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, commitDiff, prFiles, prFileDiff, fileAt, lsTree, grep, type Commit } from './git.js';
 import { Lang } from './lang.js';
+import { WebSocketServer } from 'ws';
+import { listSessions } from '@anthropic-ai/claude-agent-sdk';
+import { openTerm, listTerms, closeTerm, writeTerm, attach, closeAll } from './term.js';
 import { ghToken, prMeta } from './github.js';
 import { load, save, carryOver, stateKey, WORK_ROOT, STATE_ROOT, type PrState, type Chunk, type Verdict } from './state.js';
 import { ask, sessionsFor, shapePrompt, doubtPrompt, commitDoubtPrompt, takePrompt, type AgentEvent } from './agent.js';
@@ -165,6 +168,33 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return json(res, 200, { key: stateKey(o.state) });
   }
 
+  // ---- agent sidebar: sessions on disk, terminals running here --------------------------------
+  if (req.method === 'GET' && url.pathname === '/api/agent/sessions') {
+    const all = await listSessions({ limit: 300 });
+    const sessions = all
+      .filter((x) => !(x.cwd || '').startsWith(WORK_ROOT) || true)
+      .map((x) => ({ sessionId: x.sessionId, cwd: x.cwd, gitBranch: x.gitBranch, summary: x.customTitle || x.summary || x.firstPrompt || '', lastModified: x.lastModified, fileSize: x.fileSize }))
+      .sort((a, b) => b.lastModified - a.lastModified);
+    return json(res, 200, { sessions });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/agent/terms') return json(res, 200, { terms: listTerms() });
+  if (req.method === 'POST' && url.pathname === '/api/agent/open') {
+    const body = await readJson(req);
+    const cwd = String(body.cwd || '');
+    if (!cwd || !existsSync(cwd)) return json(res, 400, { error: 'cwd does not exist' });
+    const sessionId = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : undefined;
+    return json(res, 200, { term: openTerm({ sessionId, cwd, title: String(body.title || (sessionId ? sessionId.slice(0, 8) : 'new')) }) });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/agent/close') {
+    const body = await readJson(req);
+    return json(res, 200, { ok: closeTerm(String(body.id || '')) });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/agent/write') {
+    const body = await readJson(req);
+    const ok = writeTerm(String(body.id || ''), String(body.text || ''), body.submit !== false);
+    return ok ? json(res, 200, { ok: true }) : json(res, 404, { error: 'no such terminal, or it exited' });
+  }
+
   if (!url.pathname.startsWith('/api/')) return req.method === 'GET' ? serveStatic(res, url.pathname) : json(res, 404, { error: 'not found' });
 
   const o = open.get(url.searchParams.get('pr') || '');
@@ -316,6 +346,17 @@ const server = createServer((req, res) => {
     else res.end();
   });
 });
+
+const wss = new WebSocketServer({ noServer: true });
+server.on('upgrade', (req, socket, head) => {
+  const host = (req.headers.host || '').split(':')[0];
+  const url = new URL(req.url || '/', `http://localhost:${port}`);
+  if ((host !== '127.0.0.1' && host !== 'localhost') || url.pathname !== '/ws/term') { socket.destroy(); return; }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    if (!attach(url.searchParams.get('id') || '', ws)) ws.close();
+  });
+});
+for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, () => { closeAll(); process.exit(0); });
 
 server.listen(port, '127.0.0.1', async () => {
   const base = `http://127.0.0.1:${port}`;
