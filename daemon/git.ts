@@ -217,6 +217,31 @@ export async function prFileDiff(dir: string, baseSha: string, headSha: string, 
   return git(dir, ['diff', '--no-color', '-M', baseSha, headSha, '--', ...paths]);
 }
 
+export interface Hit { path: string; line: number; text: string }
+
+// workspace search, px0's Cmd+Shift+F: git grep over the checked-out revision, capped
+export async function grep(dir: string, rev: string, query: string, regex: boolean, limit = 500): Promise<Hit[]> {
+  let out = '';
+  try {
+    out = await git(dir, ['grep', '-n', '-I', '--no-color', '-i', regex ? '-E' : '-F', '-e', query, rev, '--', '.']);
+  } catch (err) {
+    // git grep exits 1 when nothing matches
+    if ((err as { code?: number }).code === 1) return [];
+    throw err;
+  }
+  const hits: Hit[] = [];
+  for (const line of out.split('\n')) {
+    if (!line) continue;
+    // "<rev>:<path>:<line>:<text>"; the path may itself contain ':' so split from the left twice after the rev
+    const afterRev = line.slice(rev.length + 1);
+    const m = afterRev.match(/^(.*?):(\d+):(.*)$/);
+    if (!m) continue;
+    hits.push({ path: m[1], line: Number(m[2]), text: m[3].slice(0, 200) });
+    if (hits.length >= limit) break;
+  }
+  return hits;
+}
+
 // every path in the tree at a revision; tree objects are present even in a blob-filtered clone
 export async function lsTree(dir: string, rev: string): Promise<string[]> {
   const out = await git(dir, ['ls-tree', '-r', '-z', '--name-only', rev]);

@@ -67,6 +67,13 @@ kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: 
 .palette .row .dir { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette .row .st { color: var(--accent); width: 12px; }
 .palette .none { padding: 12px 14px; color: var(--muted); }
+.palette .list { max-height: 60vh; overflow: auto; }
+.palette .row .text { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette .row .line { color: var(--muted); min-width: 40px; text-align: right; }
+.palette .row .kind { color: var(--accent); min-width: 56px; font-size: 11px; }
+.palette .mode { padding: 4px 14px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; border-bottom: 1px solid var(--line); display: flex; gap: 14px; }
+.palette .mode b { color: var(--text); }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; color: var(--text); z-index: 11; }
 .landing { height: 100%; display: flex; justify-content: center; align-items: flex-start; padding: 14vh 16px 0; overflow: auto; }
 .landing .box { width: 720px; max-width: 100%; }
 .landing h1 { font-size: 28px; margin: 0 0 6px; letter-spacing: -0.02em; }

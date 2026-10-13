@@ -26,7 +26,7 @@ Lockfiles, generated files, snapshots and whitespace-only changes are noise: the
 
 A file is read when every commit's change to it is read, in either tab. Read marks are keyed by the file's content, so after the author pushes again only the files that actually changed come back as unread.
 
-Changed lines highlight the changed words. Collapsed context expands to the full file, or `e` shows the whole file with the hunks inline, like Zed; `w` switches split and unified. Click the page once after it opens so it has keyboard focus.
+Select lines by clicking line numbers; that selection is what `y`, `Y` and the outline use as the file in focus. Changed lines highlight the changed words. Collapsed context expands to the full file, or `e` shows the whole file with the hunks inline, like Zed; `w` switches split and unified. Click the page once after it opens so it has keyboard focus.
 
 | key | does |
 |---|---|
@@ -36,6 +36,10 @@ Changed lines highlight the changed words. Collapsed context expands to the full
 | `j` / `k` | next / previous file (reading order) or commit |
 | `s` | cycle Changes, Commits, Repo |
 | `p` | open any file by fuzzy name |
+| `g` | search the repo (git grep, case-insensitive), Enter lands on the line |
+| `o` | outline of the file in focus: functions, classes, types, tests; Enter jumps |
+| `y` / `Y` | copy `path:line` for the selected lines, or a fenced snippet with context |
+| `⌘`click | go to definition of a token; `⌘⌥`click lists its references (TypeScript and JavaScript, built on first use) |
 | `e` | whole file with inline hunks, or hunks only |
 | `w` | split or unified |
 | `c` | in Commits: whole commit or one file |

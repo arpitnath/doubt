@@ -33,6 +33,52 @@ export const getFileDiff = (key: string, path: string): Promise<{ file: PrFile; 
 export const getFileAt = (key: string, rev: string, path: string, parent = false): Promise<{ contents: string | null }> =>
   fetch(`/api/file${q(key, `&rev=${encodeURIComponent(rev)}&path=${encodeURIComponent(path)}${parent ? '&parent=1' : ''}`)}`).then((r) => ok(r));
 
+export interface Hit { path: string; line: number; text: string }
+export interface Loc { path: string; line: number; col: number; text?: string }
+export const search = (key: string, query: string, regex = false): Promise<{ hits: Hit[] }> =>
+  fetch(`/api/search${q(key, `&q=${encodeURIComponent(query)}${regex ? '&re=1' : ''}`)}`).then((r) => ok(r));
+export const definitions = (key: string, path: string, line: number, col: number): Promise<{ locs: Loc[] }> =>
+  fetch(`/api/def${q(key, `&path=${encodeURIComponent(path)}&line=${line}&col=${col}`)}`).then((r) => ok(r));
+export const references = (key: string, path: string, line: number, col: number): Promise<{ locs: Loc[] }> =>
+  fetch(`/api/refs${q(key, `&path=${encodeURIComponent(path)}&line=${line}&col=${col}`)}`).then((r) => ok(r));
+
+// symbol outline, px0's regex fallback: no parser, one pattern per language family
+export interface Sym { name: string; kind: string; line: number }
+export function outline(text: string, path: string): Sym[] {
+  const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
+  const lines = text.split('\n');
+  const out: Sym[] = [];
+  const push = (line: number, kind: string, name?: string) => { if (name) out.push({ name, kind, line }); };
+  const KW = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'function', 'constructor']);
+  lines.forEach((raw, i) => {
+    const line = i + 1;
+    let m: RegExpMatchArray | null;
+    if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts'].includes(ext)) {
+      if ((m = raw.match(/^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/))) push(line, 'fn', m[1]);
+      else if ((m = raw.match(/^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/))) push(line, 'class', m[1]);
+      else if ((m = raw.match(/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::\s*[^=]+)?=>/))) push(line, 'fn', m[1]);
+      else if ((m = raw.match(/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:React\.)?(?:memo|forwardRef|createContext|createSlice|styled)\b/))) push(line, 'const', m[1]);
+      else if ((m = raw.match(/^\s*(?:export\s+)?interface\s+(\w+)/))) push(line, 'interface', m[1]);
+      else if ((m = raw.match(/^\s*(?:export\s+)?type\s+(\w+)\s*(?:<[^>]*>)?\s*=/))) push(line, 'type', m[1]);
+      else if ((m = raw.match(/^\s*(?:export\s+)?(?:const\s+)?enum\s+(\w+)/))) push(line, 'enum', m[1]);
+      else if ((m = raw.match(/^\s{2,}(?:public\s+|private\s+|protected\s+)?(?:static\s+)?(?:async\s+)?(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::\s*[^{]+)?\{\s*$/)) && !KW.has(m[1])) push(line, 'method', m[1]);
+      else if ((m = raw.match(/^\s*(?:describe|it|test)(?:\.(?:only|skip|each))?\s*\(\s*(['"`])(.+?)\1/))) push(line, raw.trimStart().startsWith('describe') ? 'suite' : 'test', m[2]);
+    } else if (ext === 'py') {
+      if ((m = raw.match(/^\s*(?:async\s+)?(def|class)\s+(\w+)/))) push(line, m[1] === 'def' ? 'fn' : 'class', m[2]);
+    } else if (ext === 'go') {
+      if ((m = raw.match(/^func\s+(?:\([^)]*\)\s*)?(\w+)/))) push(line, 'fn', m[1]);
+      else if ((m = raw.match(/^type\s+(\w+)/))) push(line, 'type', m[1]);
+    } else if (ext === 'rs') {
+      if ((m = raw.match(/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(fn|struct|enum|trait|impl|mod)\s+(\w+)/))) push(line, m[1], m[2]);
+    } else if (['md', 'mdx'].includes(ext)) {
+      if ((m = raw.match(/^(#{1,4})\s+(.+)/))) push(line, `h${m[1].length}`, m[2]);
+    } else if (['yml', 'yaml'].includes(ext)) {
+      if ((m = raw.match(/^([A-Za-z_][\w-]*):\s*$/))) push(line, 'key', m[1]);
+    }
+  });
+  return out;
+}
+
 export type VerdictTarget = { chunkId: string } | { sha: string } | { path: string } | { paths: string[] };
 export const setVerdict = (key: string, target: VerdictTarget, verdict: Verdict): Promise<{ ok: boolean; readFiles: Record<string, string> }> =>
   fetch(`/api/verdict${q(key)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...target, verdict }) }).then((r) => ok(r));

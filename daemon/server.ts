@@ -7,7 +7,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
-import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, commitDiff, prFiles, prFileDiff, fileAt, lsTree, type Commit } from './git.js';
+import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, commitDiff, prFiles, prFileDiff, fileAt, lsTree, grep, type Commit } from './git.js';
+import { Lang } from './lang.js';
 import { ghToken, prMeta } from './github.js';
 import { load, save, carryOver, stateKey, WORK_ROOT, STATE_ROOT, type PrState, type Chunk, type Verdict } from './state.js';
 import { ask, sessionsFor, shapePrompt, doubtPrompt, commitDoubtPrompt, takePrompt, type AgentEvent } from './agent.js';
@@ -22,7 +23,7 @@ const uiDist = join(here, '..', 'ui', 'dist');
 
 // ---- open PRs -----------------------------------------------------------------------------------
 
-interface Open { state: PrState; commitBySha: Map<string, Commit>; treePaths: string[]; busy: boolean; openedAt: number }
+interface Open { state: PrState; commitBySha: Map<string, Commit>; treePaths: string[]; busy: boolean; openedAt: number; lang?: Lang }
 const open = new Map<string, Open>();
 const opening = new Map<string, Promise<Open>>(); // ponytail: a double paste must not clone twice
 
@@ -172,6 +173,24 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
 
   if (req.method === 'GET' && url.pathname === '/api/pr') return json(res, 200, { ...s, busy: o.busy });
   if (req.method === 'GET' && url.pathname === '/api/tree') return json(res, 200, { paths: o.treePaths });
+
+  // workspace search over the PR head
+  if (req.method === 'GET' && url.pathname === '/api/search') {
+    const q = url.searchParams.get('q') || '';
+    if (q.length < 2) return json(res, 200, { hits: [] });
+    return json(res, 200, { hits: await grep(s.dir, s.headSha, q, url.searchParams.get('re') === '1') });
+  }
+
+  // go to definition / find references, TypeScript and JavaScript only; the service builds on first use
+  if (req.method === 'GET' && (url.pathname === '/api/def' || url.pathname === '/api/refs')) {
+    const path = url.searchParams.get('path') || '';
+    const line = Number(url.searchParams.get('line'));
+    const col = Number(url.searchParams.get('col'));
+    if (!path || !line) return json(res, 400, { error: 'path and line required' });
+    if (!o.lang) { console.error(`> building language service for ${s.owner}/${s.repo}#${s.number}`); o.lang = new Lang(s.dir, o.treePaths); }
+    const locs = url.pathname === '/api/def' ? o.lang.definitions(path, line, col) : o.lang.references(path, line, col);
+    return json(res, 200, { locs });
+  }
 
   // one file's diff: within one commit (`chunk`), or PR-wide against the merge-base (`path`)
   if (req.method === 'GET' && url.pathname === '/api/diff') {

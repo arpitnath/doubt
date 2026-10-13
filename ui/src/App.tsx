@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PatchDiff, File as PierreFile, type FileDiffMetadata, type FileDiffLoadedFiles } from '@pierre/diffs/react';
-import { fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, isNoise, readingOrder, setVerdict, type Chunk, type PrFile, type PrState, type VerdictTarget } from './api';
+import { PatchDiff, File as PierreFile, type FileDiffMetadata, type FileDiffLoadedFiles, type SelectedLineRange } from '@pierre/diffs/react';
+import { definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, isNoise, outline, readingOrder, references, search, setVerdict, type Chunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
 import { Tree } from './Tree';
 import { Landing } from './Landing';
 
@@ -26,6 +26,8 @@ export function App() {
 type Tab = 'files' | 'commits' | 'repo';
 type View = { kind: 'file'; path: string } | { kind: 'commit'; sha: string } | { kind: 'chunk'; id: string } | { kind: 'repo'; path: string };
 interface Item { key: string; path: string; oldPath?: string; oldRev: string; newRev: string; read: boolean; status: string; adds: number; dels: number }
+type PaletteMode = 'open' | 'search' | 'outline' | 'locs';
+interface Row { label: string; sub?: string; kind?: string; line?: number; path: string }
 
 function Review({ prKey }: { prKey: string }) {
   const [pr, setPr] = useState<PrState | null>(null);
@@ -36,10 +38,13 @@ function Review({ prKey }: { prKey: string }) {
   const [repoFile, setRepoFile] = useState<{ path: string; contents: string } | null>(null);
   const [fullFile, setFullFile] = useState(false); // Zed-style: whole file with inline hunks
   const [split, setSplit] = useState(true);
-  const [palette, setPalette] = useState<string | null>(null); // fuzzy-open query, null when closed
+  const [jump, setJump] = useState<{ path: string; line: number } | null>(null); // land here once rendered
+  const [sel, setSel] = useState<{ key: string; range: SelectedLineRange } | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [palette, setPalette] = useState<{ mode: PaletteMode; query: string; rows: Row[]; title?: string } | null>(null);
   const [paletteIdx, setPaletteIdx] = useState(0);
   const diffRef = useRef<HTMLDivElement>(null);
-  const paletteRef = useRef<HTMLInputElement>(null);
+  const textCache = useRef(new Map<string, string>()); // `${rev}:${path}` -> contents
 
   useEffect(() => {
     getPr(prKey).then((s) => {
@@ -50,6 +55,12 @@ function Review({ prKey }: { prKey: string }) {
     });
     getTree(prKey).then((t) => setTree(t.paths));
   }, [prKey]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 1800);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   const ordered = useMemo(() => (pr ? readingOrder(pr.files) : []), [pr]);
   const commitBySha = useMemo(() => new Map(pr?.commits.map((c) => [c.sha, c]) ?? []), [pr]);
@@ -71,15 +82,51 @@ function Review({ prKey }: { prKey: string }) {
     let cancelled = false; // fast j/j: an older response must not land on the newer view
     setPatches({});
     setRepoFile(null);
+    setSel(null);
     if (view?.kind === 'repo') {
       getFileAt(prKey, 'head', view.path).then((r) => { if (!cancelled) setRepoFile({ path: view.path, contents: r.contents ?? '' }); });
     } else {
       const loads = items.map((it) => (it.oldRev === 'base' ? getFileDiff(prKey, it.path) : getChunkDiff(prKey, it.key)).then((d) => [it.key, d.patch] as const));
       Promise.all(loads).then((pairs) => { if (!cancelled) setPatches(Object.fromEntries(pairs)); });
     }
-    diffRef.current?.scrollTo({ top: 0 });
+    if (!jump) diffRef.current?.scrollTo({ top: 0 });
     return () => { cancelled = true; };
-  }, [items, view, prKey]);
+  }, [items, view, prKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // land on a line once the target has rendered: pierre marks rows with data-line
+  useEffect(() => {
+    if (!jump) return;
+    const rendered = view?.kind === 'repo' ? repoFile?.path === jump.path : items.some((it) => it.path === jump.path && patches[it.key] !== undefined);
+    if (!rendered) return;
+    const t = setTimeout(() => {
+      const pane = diffRef.current;
+      const rows = pane ? [...pane.querySelectorAll<HTMLElement>(`[data-line="${jump.line}"]`)] : [];
+      const el = rows[rows.length - 1]; // the new side comes last in a split row
+      if (el) el.scrollIntoView({ block: 'center' });
+      const key = view?.kind === 'repo' ? jump.path : items.find((it) => it.path === jump.path)?.key;
+      if (key) setSel({ key, range: { start: jump.line, end: jump.line, side: 'additions' } });
+      setJump(null);
+    }, 60);
+    return () => clearTimeout(t);
+  }, [jump, patches, repoFile, items, view]);
+
+  // text of a file at a revision, cached: outline, copy with context and definitions all need it
+  const textOf = useCallback(async (rev: string, path: string): Promise<string> => {
+    const k = `${rev}:${path}`;
+    const have = textCache.current.get(k);
+    if (have !== undefined) return have;
+    const r = await getFileAt(prKey, rev, path);
+    const text = r.contents ?? '';
+    textCache.current.set(k, text);
+    return text;
+  }, [prKey]);
+
+  // the file the reader is "in": the selection's item, else the single shown file, else the repo file
+  const focus = useMemo((): { path: string; rev: string; key: string } | null => {
+    if (view?.kind === 'repo') return { path: view.path, rev: 'head', key: view.path };
+    const it = (sel && items.find((i) => i.key === sel.key)) ?? (items.length === 1 ? items[0] : undefined);
+    return it ? { path: it.path, rev: it.newRev, key: it.key } : null;
+  }, [view, sel, items]);
 
   // ---- verdicts ----------------------------------------------------------------------------------
   const apply = useCallback(async (target: VerdictTarget, verdict: 'understood' | 'none') => {
@@ -167,9 +214,11 @@ function Review({ prKey }: { prKey: string }) {
   }, []);
 
   // open any path: a changed file shows its PR diff, anything else shows the file at the PR head
-  const openPath = useCallback((path: string) => {
-    setView(fileByPath.has(path) ? { kind: 'file', path } : { kind: 'repo', path });
-  }, [fileByPath]);
+  const openPath = useCallback((path: string, line?: number) => {
+    if (line) setJump({ path, line });
+    if (fileByPath.has(path)) { setView({ kind: 'file', path }); if (tab === 'commits') setTab('files'); }
+    else { setView({ kind: 'repo', path }); setTab('repo'); }
+  }, [fileByPath, tab]);
 
   const switchTab = useCallback((t: Tab) => {
     if (!pr) return;
@@ -184,21 +233,102 @@ function Review({ prKey }: { prKey: string }) {
     }
   }, [pr, view, fileByPath, ordered, isRead]);
 
-  const matches = useMemo(() => (palette === null ? [] : fuzzy(palette, tree)), [palette, tree]);
+  // ---- palette: open, search, outline, locations ------------------------------------------------
+  const openPalette = useCallback(async (mode: PaletteMode) => {
+    setPaletteIdx(0);
+    if (mode === 'outline') {
+      if (!focus) { setToast('no file in focus'); return; }
+      const text = await textOf(focus.rev, focus.path);
+      const syms = outline(text, focus.path);
+      setPalette({ mode, query: '', title: focus.path, rows: syms.map((s) => ({ label: s.name, kind: s.kind, line: s.line, path: focus.path })) });
+      return;
+    }
+    setPalette({ mode, query: '', rows: [] });
+  }, [focus, textOf]);
+
+  const paletteRows = useMemo((): Row[] => {
+    if (!palette) return [];
+    if (palette.mode === 'open') return fuzzy(palette.query, tree).map((p) => ({ label: p.slice(p.lastIndexOf('/') + 1), sub: p.slice(0, Math.max(0, p.lastIndexOf('/'))), path: p }));
+    if (palette.mode === 'outline') {
+      const qq = palette.query.toLowerCase();
+      return palette.rows.filter((r) => !qq || r.label.toLowerCase().includes(qq));
+    }
+    return palette.rows;
+  }, [palette, tree]);
+
+  // search as you type, debounced, newest query wins
+  useEffect(() => {
+    if (!palette || palette.mode !== 'search') return;
+    const qq = palette.query;
+    if (qq.trim().length < 2) { setPalette((p) => (p ? { ...p, rows: [] } : p)); return; }
+    const t = setTimeout(() => {
+      search(prKey, qq).then((r) => setPalette((p) => (p && p.mode === 'search' && p.query === qq ? { ...p, rows: r.hits.map((h) => ({ label: h.text.trim(), sub: h.path, line: h.line, path: h.path })) } : p)));
+    }, 180);
+    return () => clearTimeout(t);
+  }, [palette?.query, palette?.mode, prKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const pickRow = useCallback((r: Row) => {
+    setPalette(null);
+    openPath(r.path, r.line);
+  }, [openPath]);
+
+  // ---- code intelligence: cmd-click a token for its definition, shift-cmd-click for references --
+  const showLocs = useCallback((title: string, locs: Loc[]) => {
+    if (locs.length === 0) { setToast(`${title}: nothing found`); return; }
+    if (locs.length === 1) { openPath(locs[0].path, locs[0].line); return; }
+    setPaletteIdx(0);
+    setPalette({ mode: 'locs', query: '', title, rows: locs.map((l) => ({ label: l.text || '', sub: l.path, line: l.line, path: l.path })) });
+  }, [openPath]);
+
+  const tokenClick = useCallback((path: string, line: number, col: number, ev: MouseEvent) => {
+    if (!(ev.metaKey || ev.ctrlKey)) return;
+    ev.preventDefault();
+    const wantRefs = ev.altKey; // not shift: shift+click is pierre's range selection
+    setToast(wantRefs ? 'finding references…' : 'finding definition…');
+    (wantRefs ? references(prKey, path, line, col) : definitions(prKey, path, line, col))
+      .then((r) => { setToast(null); showLocs(wantRefs ? 'references' : 'definition', r.locs); })
+      .catch((err) => setToast(err instanceof Error ? err.message : String(err)));
+  }, [prKey, showLocs]);
+
+  // ---- copy reference / copy with context (px0's Alt+C / Alt+A) ----------------------------------
+  const copyRef = useCallback(async (withContext: boolean) => {
+    if (!focus) { setToast('select lines first'); return; }
+    const range = sel && sel.key === focus.key ? { start: Math.min(sel.range.start, sel.range.end), end: Math.max(sel.range.start, sel.range.end) } : null;
+    const ref = range ? (range.start === range.end ? `${focus.path}:${range.start}` : `${focus.path}:${range.start}-${range.end}`) : focus.path;
+    let text = ref;
+    if (withContext) {
+      const body = await textOf(focus.rev, focus.path);
+      const lines = body.split('\n');
+      const a = range ? Math.max(1, range.start - 3) : 1;
+      const b = range ? Math.min(lines.length, range.end + 3) : Math.min(lines.length, 60);
+      text = `\`\`\`\n// ${ref}\n${lines.slice(a - 1, b).join('\n')}\n\`\`\``;
+    }
+    await navigator.clipboard.writeText(text);
+    setToast(`copied ${withContext ? 'with context' : ref}`);
+  }, [focus, sel, textOf]);
 
   // ---- keys ---------------------------------------------------------------------------------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (palette !== null) {
+      const typing = (e.target as HTMLElement)?.tagName === 'INPUT';
+      if (palette) {
         if (e.key === 'Escape') setPalette(null);
-        else if (e.key === 'ArrowDown') { e.preventDefault(); setPaletteIdx((i) => Math.min(i + 1, matches.length - 1)); }
+        else if (e.key === 'ArrowDown') { e.preventDefault(); setPaletteIdx((i) => Math.min(i + 1, Math.max(0, paletteRows.length - 1))); }
         else if (e.key === 'ArrowUp') { e.preventDefault(); setPaletteIdx((i) => Math.max(i - 1, 0)); }
-        else if (e.key === 'Enter') { const m = matches[paletteIdx]; if (m) { openPath(m); setPalette(null); } }
+        else if (e.key === 'Enter') { const r = paletteRows[paletteIdx]; if (r) pickRow(r); }
         return;
       }
-      if ((e.metaKey || e.ctrlKey) && e.key === 'p') { e.preventDefault(); setPalette(''); setPaletteIdx(0); setTimeout(() => paletteRef.current?.focus(), 0); return; }
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key === 'p') { e.preventDefault(); setPalette(''); setPaletteIdx(0); } // preventDefault: the p must not land in the input that autofocuses
+      if (typing) return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key === 'p') { e.preventDefault(); void openPalette('open'); return; }
+      if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); void openPalette('search'); return; }
+      if (mod && e.shiftKey && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); void openPalette('outline'); return; }
+      if (mod || e.altKey) return;
+      if (e.key === 'p') { e.preventDefault(); void openPalette('open'); } // preventDefault: the p must not land in the input that autofocuses
+      else if (e.key === 'g') { e.preventDefault(); void openPalette('search'); }
+      else if (e.key === 'o') { e.preventDefault(); void openPalette('outline'); }
+      else if (e.key === 'y') void copyRef(false);
+      else if (e.key === 'Y') void copyRef(true);
       else if (e.key === 'u') void judge('understood');
       else if (e.key === 'x') void judge('none');
       else if (e.key === 'n') void skipNoise();
@@ -216,29 +346,46 @@ function Review({ prKey }: { prKey: string }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [judge, skipNoise, switchTab, move, jumpStack, openPath, tab, view, pr, palette, matches, paletteIdx]);
+  }, [judge, skipNoise, switchTab, move, jumpStack, openPalette, pickRow, copyRef, tab, view, pr, palette, paletteRows, paletteIdx]);
 
   // ---- render -------------------------------------------------------------------------------------
-  const diffOptions = useMemo(() => ({
+  const theme = useMemo(() => ({ dark: 'github-dark' as const, light: 'github-light' as const }), []);
+
+  const diffOptionsFor = useCallback((it: Item) => ({
     diffStyle: (fullFile ? 'unified' : split ? 'split' : 'unified') as 'split' | 'unified',
-    theme: { dark: 'github-dark' as const, light: 'github-light' as const },
+    theme,
     lineDiffType: 'word' as const,
     stickyHeader: true,
-    expandUnchanged: fullFile
-  }), [fullFile, split]);
+    expandUnchanged: fullFile,
+    enableLineSelection: true,
+    onLineSelectionEnd: (range: SelectedLineRange | null) => setSel(range ? { key: it.key, range } : null),
+    onTokenClick: (p: { lineNumber: number; lineCharStart: number; side?: 'deletions' | 'additions' }, ev: MouseEvent) => {
+      if (p.side === 'deletions') return; // definitions resolve against the new side only
+      tokenClick(it.path, p.lineNumber, p.lineCharStart, ev);
+    },
+    loadDiffFiles: loaderFor(it)
+  }), [fullFile, split, theme, tokenClick]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const fileOptions = useMemo(() => ({ theme: { dark: 'github-dark' as const, light: 'github-light' as const }, stickyHeader: true }), []);
+  const fileOptionsFor = useCallback((path: string) => ({
+    theme,
+    stickyHeader: true,
+    enableLineSelection: true,
+    onLineSelectionEnd: (range: SelectedLineRange | null) => setSel(range ? { key: path, range } : null),
+    onTokenClick: (p: { lineNumber: number; lineCharStart: number }, ev: MouseEvent) => tokenClick(path, p.lineNumber, p.lineCharStart, ev)
+  }), [theme, tokenClick]);
 
   // context expansion: pierre asks for both full sides when a collapsed region is opened, or at once in full-file mode
-  const loaderFor = useCallback((it: Item) => async (meta: FileDiffMetadata): Promise<FileDiffLoadedFiles> => {
-    const oldName = meta.prevName || meta.name;
-    const parent = it.oldRev.endsWith('^');
-    const [oldSide, newSide] = await Promise.all([
-      getFileAt(prKey, parent ? it.oldRev.slice(0, -1) : it.oldRev, oldName, parent),
-      getFileAt(prKey, it.newRev, meta.name)
-    ]);
-    return { oldFile: { name: oldName, contents: oldSide.contents ?? '' }, newFile: { name: meta.name, contents: newSide.contents ?? '' } };
-  }, [prKey]);
+  function loaderFor(it: Item) {
+    return async (meta: FileDiffMetadata): Promise<FileDiffLoadedFiles> => {
+      const oldName = meta.prevName || meta.name;
+      const parent = it.oldRev.endsWith('^');
+      const [oldText, newText] = await Promise.all([
+        getFileAt(prKey, parent ? it.oldRev.slice(0, -1) : it.oldRev, oldName, parent).then((r) => r.contents ?? ''),
+        textOf(it.newRev, meta.name)
+      ]);
+      return { oldFile: { name: oldName, contents: oldText }, newFile: { name: meta.name, contents: newText } };
+    };
+  }
 
   if (!pr) return <div className="main"><div className="empty">loading…</div></div>;
 
@@ -262,10 +409,10 @@ function Review({ prKey }: { prKey: string }) {
           <button className={tab === 'files' ? 'on' : ''} onClick={() => switchTab('files')}>Changes</button>
           <button className={tab === 'commits' ? 'on' : ''} onClick={() => switchTab('commits')}>Commits</button>
           <button className={tab === 'repo' ? 'on' : ''} onClick={() => switchTab('repo')}>Repo</button>
-          <span className="hint"><kbd>s</kbd> <kbd>p</kbd></span>
+          <span className="hint"><kbd>s</kbd> <kbd>p</kbd> <kbd>g</kbd> <kbd>o</kbd></span>
         </div>
-        {tab === 'files' && <Tree paths={pr.files.map((f) => f.path)} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={openPath} />}
-        {tab === 'repo' && (tree.length ? <Tree paths={tree} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={openPath} repo /> : <div className="empty">loading tree…</div>)}
+        {tab === 'files' && <Tree paths={pr.files.map((f) => f.path)} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={(p) => openPath(p)} />}
+        {tab === 'repo' && (tree.length ? <Tree paths={tree} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={(p) => openPath(p)} repo /> : <div className="empty">loading tree…</div>)}
         {tab === 'commits' && pr.commits.map((c) => {
           const mine = pr.chunks.filter((k) => k.sha === c.sha);
           const done = mine.length > 0 && mine.every((k) => k.verdict !== 'none');
@@ -299,20 +446,21 @@ function Review({ prKey }: { prKey: string }) {
                 : <span>nothing left to read</span>}
           <span className="keys">
             <kbd>u</kbd> read &nbsp; <kbd>x</kbd> unmark &nbsp; <kbd>j</kbd>/<kbd>k</kbd> move &nbsp;
-            <kbd>e</kbd> {fullFile ? 'hunks only' : 'full file'} &nbsp; <kbd>w</kbd> {split ? 'unified' : 'split'}
+            <kbd>e</kbd> {fullFile ? 'hunks only' : 'full file'} &nbsp; <kbd>w</kbd> {split ? 'unified' : 'split'} &nbsp;
+            <kbd>y</kbd> ref &nbsp; <kbd>⌘</kbd>click def
             {tab === 'commits' && <> &nbsp; <kbd>c</kbd> {view?.kind === 'commit' ? 'one file' : 'whole commit'} &nbsp; <kbd>[</kbd>/<kbd>]</kbd> file</>}
           </span>
         </div>
         <div className="diff" ref={diffRef}>
           {view?.kind === 'repo' && (repoFile
-            ? <div className="stack"><PierreFile file={{ name: repoFile.path, contents: repoFile.contents }} options={fileOptions} disableWorkerPool /></div>
+            ? <div className="stack"><PierreFile file={{ name: repoFile.path, contents: repoFile.contents }} options={fileOptionsFor(repoFile.path)} selectedLines={sel?.key === repoFile.path ? sel.range : null} disableWorkerPool /></div>
             : <div className="empty">loading {view.path}…</div>)}
           {view?.kind !== 'repo' && items.length === 0 && <div className="empty">every file read</div>}
           {items.map((it) => (
             <div key={it.key} className={`stack ${it.read ? 'understood' : ''}`}>
               {patches[it.key] !== undefined
                 ? patches[it.key].trim()
-                  ? <PatchDiff key={`${it.key}:${fullFile}:${split}`} patch={patches[it.key]} options={{ ...diffOptions, loadDiffFiles: loaderFor(it) }} disableWorkerPool />
+                  ? <PatchDiff key={`${it.key}:${fullFile}:${split}`} patch={patches[it.key]} options={diffOptionsFor(it)} selectedLines={sel?.key === it.key ? sel.range : null} disableWorkerPool />
                   : <div className="empty">{it.path}: no textual diff (binary or empty)</div>
                 : <div className="empty">loading {it.path}…</div>}
             </div>
@@ -320,26 +468,35 @@ function Review({ prKey }: { prKey: string }) {
         </div>
       </div>
 
-      {palette !== null && (
+      {palette && (
         <div className="palette" onClick={() => setPalette(null)}>
           <div className="box" onClick={(e) => e.stopPropagation()}>
-            <input ref={paletteRef} autoFocus value={palette} placeholder="open file by name…" onChange={(e) => { setPalette(e.target.value); setPaletteIdx(0); }} />
-            {matches.length === 0
-              ? <div className="none">{palette ? 'no match' : `${tree.length} files in the repo`}</div>
-              : matches.map((m, i) => {
-                const f = fileByPath.get(m);
-                const slash = m.lastIndexOf('/');
-                return (
-                  <div key={m} className={`row ${i === paletteIdx ? 'on' : ''}`} onMouseEnter={() => setPaletteIdx(i)} onClick={() => { openPath(m); setPalette(null); }}>
-                    <span className="st">{f ? f.status : ''}</span>
-                    <span>{m.slice(slash + 1)}</span>
-                    <span className="dir">{slash > 0 ? m.slice(0, slash) : ''}</span>
+            <div className="mode">
+              <span><b>{palette.mode === 'open' ? 'open file' : palette.mode === 'search' ? 'search repo' : palette.mode === 'outline' ? 'outline' : palette.title}</b></span>
+              {palette.mode === 'outline' && <span>{palette.title}</span>}
+              {palette.mode === 'locs' && <span>{palette.rows.length} places</span>}
+              {palette.mode === 'search' && <span>{palette.rows.length ? `${palette.rows.length} hits` : 'git grep, case-insensitive'}</span>}
+            </div>
+            {palette.mode !== 'locs' && (
+              <input autoFocus value={palette.query} placeholder={palette.mode === 'open' ? 'file name…' : palette.mode === 'search' ? 'text to find…' : 'symbol…'} onChange={(e) => { const v = e.target.value; setPalette((p) => (p ? { ...p, query: v } : p)); setPaletteIdx(0); }} />
+            )}
+            <div className="list">
+              {paletteRows.length === 0
+                ? <div className="none">{palette.mode === 'open' ? `${tree.length} files in the repo` : palette.mode === 'outline' ? 'no symbols found' : palette.query.length < 2 ? 'type at least two characters' : 'no match'}</div>
+                : paletteRows.map((r, i) => (
+                  <div key={`${r.path}:${r.line ?? ''}:${i}`} className={`row ${i === paletteIdx ? 'on' : ''}`} onMouseEnter={() => setPaletteIdx(i)} onClick={() => pickRow(r)}>
+                    {r.kind && <span className="kind">{r.kind}</span>}
+                    {palette.mode === 'open' && <span className="st">{fileByPath.get(r.path)?.status ?? ''}</span>}
+                    <span className={palette.mode === 'open' ? '' : 'text'}>{r.label}</span>
+                    {r.sub !== undefined && <span className="dir">{r.sub}</span>}
+                    {r.line !== undefined && <span className="line">{r.line}</span>}
                   </div>
-                );
-              })}
+                ))}
+            </div>
           </div>
         </div>
       )}
+      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }
