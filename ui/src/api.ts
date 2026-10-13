@@ -8,7 +8,7 @@ export interface PrFile { path: string; oldPath?: string; status: string; adds: 
 export interface PrState {
   url: string; owner: string; repo: string; number: number; title: string; author: string;
   headSha: string; baseSha: string; baseRef: string; dir: string;
-  commits: Commit[]; chunks: Chunk[]; files: PrFile[]; readFiles: Record<string, string>; busy: boolean;
+  commits: Commit[]; chunks: Chunk[]; files: PrFile[]; readFiles: Record<string, string>; hunkMarks?: Record<string, number[]>; busy: boolean;
 }
 export interface KnownPr { key: string; url: string; owner: string; repo: string; number: number; title: string; author: string; read: number; files: number; open: boolean; updated: number }
 
@@ -82,6 +82,24 @@ export function outline(text: string, path: string): Sym[] {
 export type VerdictTarget = { chunkId: string } | { sha: string } | { path: string } | { paths: string[] };
 export const setVerdict = (key: string, target: VerdictTarget, verdict: Verdict): Promise<{ ok: boolean; readFiles: Record<string, string> }> =>
   fetch(`/api/verdict${q(key)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...target, verdict }) }).then((r) => ok(r));
+
+export interface HistoryEntry { sha: string; subject: string; author: string; date: string; pr?: number; lines: number }
+export const historyOf = (key: string, path: string, start: number, end: number): Promise<{ entries: HistoryEntry[] }> =>
+  fetch(`/api/history${q(key, `&path=${encodeURIComponent(path)}&start=${start}&end=${end}`)}`).then((r) => ok(r));
+export const setHunk = (key: string, itemKey: string, index: number, read: boolean): Promise<{ ok: boolean; hunkMarks: Record<string, number[]> }> =>
+  fetch(`/api/hunk${q(key)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: itemKey, index, read }) }).then((r) => ok(r));
+
+// hunks of a unified patch: where each starts on the new side (or the old side for pure deletions)
+export interface Hunk { index: number; newStart: number; newCount: number; oldStart: number; oldCount: number }
+export function parseHunks(patch: string): Hunk[] {
+  const out: Hunk[] = [];
+  const re = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(patch))) {
+    out.push({ index: out.length, oldStart: Number(m[1]), oldCount: m[2] === undefined ? 1 : Number(m[2]), newStart: Number(m[3]), newCount: m[4] === undefined ? 1 : Number(m[4]) });
+  }
+  return out;
+}
 
 // agent sidebar: sessions on disk, terminals running here
 export interface AgentSession { sessionId: string; cwd?: string; gitBranch?: string; summary: string; lastModified: number; fileSize?: number }

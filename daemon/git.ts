@@ -242,6 +242,29 @@ export async function grep(dir: string, rev: string, query: string, regex: boole
   return hits;
 }
 
+export interface HistoryEntry { sha: string; subject: string; author: string; date: string; pr?: number; lines: number }
+
+// who last touched these lines: blame on the revision, one entry per commit, most lines first
+export async function history(dir: string, rev: string, path: string, start: number, end: number): Promise<HistoryEntry[]> {
+  const out = await git(dir, ['blame', '-L', `${start},${end}`, '--porcelain', rev, '--', path]);
+  const byCommit = new Map<string, HistoryEntry>();
+  let cur: HistoryEntry | null = null;
+  for (const line of out.split('\n')) {
+    const head = line.match(/^([0-9a-f]{40}) \d+ \d+(?: (\d+))?$/);
+    if (head) {
+      cur = byCommit.get(head[1]) ?? { sha: head[1], subject: '', author: '', date: '', lines: 0 };
+      cur.lines += 1;
+      byCommit.set(head[1], cur);
+      continue;
+    }
+    if (!cur) continue;
+    if (line.startsWith('summary ')) { cur.subject = line.slice(8); const m = cur.subject.match(/\(#(\d+)\)/); if (m) cur.pr = Number(m[1]); }
+    else if (line.startsWith('author ')) cur.author = line.slice(7);
+    else if (line.startsWith('author-time ')) cur.date = new Date(Number(line.slice(12)) * 1000).toISOString().slice(0, 10);
+  }
+  return [...byCommit.values()].sort((a, b) => b.lines - a.lines);
+}
+
 // every path in the tree at a revision; tree objects are present even in a blob-filtered clone
 export async function lsTree(dir: string, rev: string): Promise<string[]> {
   const out = await git(dir, ['ls-tree', '-r', '-z', '--name-only', rev]);

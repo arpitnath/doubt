@@ -47,6 +47,7 @@ export interface PrState {
   chunks: Chunk[];
   files: PrFile[];
   readFiles: Record<string, string>; // path -> `${oldBlob}:${newBlob}` when fully read
+  hunkMarks?: Record<string, number[]>; // item key (path, or chunk id) -> indexes of hunks marked read
   doubts: Doubt[];
 }
 

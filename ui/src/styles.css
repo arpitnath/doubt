@@ -158,3 +158,4 @@ kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: 
 .picker .s .cwd { font-family: ui-monospace, Menlo, monospace; color: var(--muted); font-size: 11px; }
 .picker .s .sum { margin-top: 2px; }
 .thinking { color: var(--muted); font-style: italic; }
+.hunk-read { font-size: 11px; color: var(--ok); padding: 2px 10px; border-left: 2px solid var(--ok); background: rgba(76,175,122,0.08); }

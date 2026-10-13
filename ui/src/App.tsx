@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PatchDiff, File as PierreFile, type FileDiffMetadata, type FileDiffLoadedFiles, type SelectedLineRange } from '@pierre/diffs/react';
-import { definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, isNoise, outline, readingOrder, references, search, setVerdict, type Chunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
+import { PatchDiff, File as PierreFile, type DiffLineAnnotation, type FileDiffMetadata, type FileDiffLoadedFiles, type SelectedLineRange } from '@pierre/diffs/react';
+import { definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, isNoise, outline, parseHunks, readingOrder, references, search, setHunk, setVerdict, type Chunk, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
 import { Tree } from './Tree';
 import { Landing } from './Landing';
 import { Agent, type AgentHandle } from './Agent';
@@ -27,7 +27,7 @@ export function App() {
 type Tab = 'files' | 'commits' | 'repo';
 type View = { kind: 'file'; path: string } | { kind: 'commit'; sha: string } | { kind: 'chunk'; id: string } | { kind: 'repo'; path: string };
 interface Item { key: string; path: string; oldPath?: string; oldRev: string; newRev: string; read: boolean; status: string; adds: number; dels: number }
-type PaletteMode = 'open' | 'search' | 'outline' | 'locs';
+type PaletteMode = 'open' | 'search' | 'outline' | 'locs' | 'history';
 interface Row { label: string; sub?: string; kind?: string; line?: number; path: string }
 
 function Review({ prKey }: { prKey: string }) {
@@ -45,6 +45,7 @@ function Review({ prKey }: { prKey: string }) {
   const [palette, setPalette] = useState<{ mode: PaletteMode; query: string; rows: Row[]; title?: string } | null>(null);
   const [agentOpen, setAgentOpen] = useState(false);
   const [comment, setComment] = useState<string | null>(null); // the review comment being written, null when closed
+  const [cursor, setCursor] = useState<{ key: string; hunk: number } | null>(null); // the hunk last jumped to
   const agentRef = useRef<AgentHandle>(null);
   const commentRef = useRef<HTMLTextAreaElement>(null);
   const [paletteIdx, setPaletteIdx] = useState(0);
@@ -83,11 +84,13 @@ function Review({ prKey }: { prKey: string }) {
     return chunks.map((c) => ({ key: c.id, path: c.path, oldRev: `${c.sha}^`, newRev: c.sha, read: c.verdict !== 'none', status: c.status, adds: c.adds, dels: c.dels }));
   }, [pr, view, fileByPath, isRead]);
 
+  const itemsKey = items.map((it) => it.key).join('|'); // reload only when what is shown changes, not when a flag on it does
   useEffect(() => {
     let cancelled = false; // fast j/j: an older response must not land on the newer view
     setPatches({});
     setRepoFile(null);
     setSel(null);
+    setCursor(null);
     if (view?.kind === 'repo') {
       getFileAt(prKey, 'head', view.path).then((r) => { if (!cancelled) setRepoFile({ path: view.path, contents: r.contents ?? '' }); });
     } else {
@@ -96,7 +99,7 @@ function Review({ prKey }: { prKey: string }) {
     }
     if (!jump) diffRef.current?.scrollTo({ top: 0 });
     return () => { cancelled = true; };
-  }, [items, view, prKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [itemsKey, view?.kind, view?.kind === 'repo' ? view.path : '', prKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // land on a line once the target has rendered: pierre marks rows with data-line
   useEffect(() => {
@@ -274,8 +277,8 @@ function Review({ prKey }: { prKey: string }) {
 
   const pickRow = useCallback((r: Row) => {
     setPalette(null);
-    openPath(r.path, r.line);
-  }, [openPath]);
+    if (r.line !== undefined || palette?.mode === 'open') openPath(r.path, r.line);
+  }, [openPath, palette?.mode]);
 
   // ---- code intelligence: cmd-click a token for its definition, shift-cmd-click for references --
   const showLocs = useCallback((title: string, locs: Loc[]) => {
@@ -311,6 +314,62 @@ function Review({ prKey }: { prKey: string }) {
     await navigator.clipboard.writeText(text);
     setToast(`copied ${withContext ? 'with context' : ref}`);
   }, [focus, sel, textOf]);
+
+  // hunks per shown item, from the patch text, so navigation and marks never depend on pierre's DOM
+  const hunksOf = useMemo(() => {
+    const m = new Map<string, Hunk[]>();
+    for (const it of items) if (patches[it.key] !== undefined) m.set(it.key, parseHunks(patches[it.key]));
+    return m;
+  }, [items, patches]);
+  const flatHunks = useMemo(() => items.flatMap((it) => (hunksOf.get(it.key) ?? []).map((h) => ({ key: it.key, hunk: h }))), [items, hunksOf]);
+  const hunkMarks = pr?.hunkMarks ?? {};
+  const isHunkRead = useCallback((key: string, index: number) => (hunkMarks[key] ?? []).includes(index), [hunkMarks]);
+
+  const scrollToHunk = useCallback((key: string, h: Hunk) => {
+    const pane = diffRef.current;
+    if (!pane) return;
+    const stack = [...pane.querySelectorAll<HTMLElement>('.stack')].find((el) => el.dataset.key === key);
+    const line = h.newCount > 0 ? h.newStart : h.oldStart;
+    const rows = stack ? [...stack.querySelectorAll<HTMLElement>(`[data-line="${line}"]`)] : [];
+    const el = h.newCount > 0 ? rows[rows.length - 1] : rows[0];
+    if (el) el.scrollIntoView({ block: 'start' });
+    else stack?.scrollIntoView({ block: 'start' });
+    setCursor({ key, hunk: h.index });
+  }, []);
+
+  // space / shift+space: next and previous hunk across everything shown
+  const stepHunk = useCallback((dir: 1 | -1) => {
+    if (!flatHunks.length) return;
+    const i = cursor ? flatHunks.findIndex((x) => x.key === cursor.key && x.hunk.index === cursor.hunk) : -1;
+    const next = flatHunks[Math.min(Math.max(i + dir, 0), flatHunks.length - 1)];
+    if (next) scrollToHunk(next.key, next.hunk);
+  }, [flatHunks, cursor, scrollToHunk]);
+
+  // m: toggle the current hunk read; when every hunk of a file is read, the file is read
+  const toggleHunk = useCallback(async () => {
+    const cur = cursor ?? (sel ? { key: sel.key, hunk: (hunksOf.get(sel.key) ?? []).find((h) => Math.min(sel.range.start, sel.range.end) >= h.newStart && Math.max(sel.range.start, sel.range.end) < h.newStart + Math.max(1, h.newCount))?.index ?? -1 } : null);
+    if (!cur || cur.hunk < 0) { setToast('no hunk under the cursor: space to jump to one'); return; }
+    const read = !isHunkRead(cur.key, cur.hunk);
+    const r = await setHunk(prKey, cur.key, cur.hunk, read);
+    setPr((p) => (p ? { ...p, hunkMarks: r.hunkMarks } : p));
+    const all = hunksOf.get(cur.key) ?? [];
+    if (read && all.length && all.every((h) => (r.hunkMarks[cur.key] ?? []).includes(h.index))) {
+      const it = items.find((x) => x.key === cur.key);
+      if (it) await apply(it.oldRev === 'base' ? { path: it.path } : { chunkId: it.key }, 'understood');
+      setToast('every hunk read: file marked read');
+    }
+  }, [cursor, sel, hunksOf, isHunkRead, prKey, items, apply]);
+
+  // b: who last touched the selected lines, or the current hunk
+  const showHistory = useCallback(async () => {
+    if (!focus) { setToast('open a file first'); return; }
+    let range = sel && sel.key === focus.key ? { start: Math.min(sel.range.start, sel.range.end), end: Math.max(sel.range.start, sel.range.end) } : null;
+    if (!range && cursor && cursor.key === focus.key) { const h = (hunksOf.get(focus.key) ?? [])[cursor.hunk]; if (h && h.newCount > 0) range = { start: h.newStart, end: h.newStart + h.newCount - 1 }; }
+    if (!range) { setToast('select lines or jump to a hunk first'); return; }
+    const r = await historyOf(prKey, focus.path, range.start, range.end);
+    setPaletteIdx(0);
+    setPalette({ mode: 'history', query: '', title: `${focus.path}:${range.start}-${range.end}`, rows: r.entries.map((e) => ({ label: e.subject, sub: `${e.author} · ${e.date} · ${e.lines} line${e.lines === 1 ? '' : 's'}`, kind: e.pr ? `#${e.pr}` : e.sha.slice(0, 7), path: focus.path })) });
+  }, [focus, sel, cursor, hunksOf, prKey]);
 
   // ---- review comment to the active agent session (GitHub's gesture, the agent as recipient) --
   const commentTarget = useMemo(() => {
@@ -365,6 +424,9 @@ function Review({ prKey }: { prKey: string }) {
       else if (e.key === 'p') { e.preventDefault(); void openPalette('open'); } // preventDefault: the p must not land in the input that autofocuses
       else if (e.key === 'g') { e.preventDefault(); void openPalette('search'); }
       else if (e.key === 'o') { e.preventDefault(); void openPalette('outline'); }
+      else if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); stepHunk(e.shiftKey ? -1 : 1); }
+      else if (e.key === 'm') void toggleHunk();
+      else if (e.key === 'b') void showHistory();
       else if (e.key === 'y') void copyRef(false);
       else if (e.key === 'Y') void copyRef(true);
       else if (e.key === 'u') void judge('understood');
@@ -384,7 +446,7 @@ function Review({ prKey }: { prKey: string }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [judge, skipNoise, switchTab, move, jumpStack, openPalette, pickRow, copyRef, sendComment, commentTarget, comment, tab, view, pr, palette, paletteRows, paletteIdx]);
+  }, [judge, skipNoise, switchTab, move, jumpStack, openPalette, pickRow, copyRef, sendComment, commentTarget, comment, stepHunk, toggleHunk, showHistory, tab, view, pr, palette, paletteRows, paletteIdx]);
 
   // ---- render -------------------------------------------------------------------------------------
   const theme = useMemo(() => ({ dark: 'github-dark' as const, light: 'github-light' as const }), []);
@@ -411,6 +473,11 @@ function Review({ prKey }: { prKey: string }) {
     onLineSelectionEnd: (range: SelectedLineRange | null) => setSel(range ? { key: path, range } : null),
     onTokenClick: (p: { lineNumber: number; lineCharStart: number }, ev: MouseEvent) => tokenClick(path, p.lineNumber, p.lineCharStart, ev)
   }), [theme, tokenClick]);
+
+  const annotationsFor = useCallback((it: Item): DiffLineAnnotation<{ index: number }>[] =>
+    (hunksOf.get(it.key) ?? []).filter((h) => isHunkRead(it.key, h.index)).map((h) => (
+      h.newCount > 0 ? { side: 'additions' as const, lineNumber: h.newStart, metadata: { index: h.index } } : { side: 'deletions' as const, lineNumber: h.oldStart, metadata: { index: h.index } }
+    )), [hunksOf, isHunkRead]);
 
   // context expansion: pierre asks for both full sides when a collapsed region is opened, or at once in full-file mode
   function loaderFor(it: Item) {
@@ -485,6 +552,7 @@ function Review({ prKey }: { prKey: string }) {
           <span className="keys">
             <kbd>u</kbd> read &nbsp; <kbd>x</kbd> unmark &nbsp; <kbd>j</kbd>/<kbd>k</kbd> move &nbsp;
             <kbd>e</kbd> {fullFile ? 'hunks only' : 'full file'} &nbsp; <kbd>w</kbd> {split ? 'unified' : 'split'} &nbsp;
+            <kbd>space</kbd> hunk{flatHunks.length ? ` ${cursor ? flatHunks.findIndex((x) => x.key === cursor.key && x.hunk.index === cursor.hunk) + 1 : 0}/${flatHunks.length}` : ''} &nbsp; <kbd>m</kbd> mark &nbsp; <kbd>b</kbd> history &nbsp;
             <kbd>y</kbd> ref &nbsp; <kbd>⌘</kbd>click def &nbsp; <kbd>d</kbd> comment &nbsp; <kbd>a</kbd> agent
             {tab === 'commits' && <> &nbsp; <kbd>c</kbd> {view?.kind === 'commit' ? 'one file' : 'whole commit'} &nbsp; <kbd>[</kbd>/<kbd>]</kbd> file</>}
           </span>
@@ -495,10 +563,10 @@ function Review({ prKey }: { prKey: string }) {
             : <div className="empty">loading {view.path}…</div>)}
           {view?.kind !== 'repo' && items.length === 0 && <div className="empty">every file read</div>}
           {items.map((it) => (
-            <div key={it.key} className={`stack ${it.read ? 'understood' : ''}`}>
+            <div key={it.key} className={`stack ${it.read ? 'understood' : ''}`} data-key={it.key}>
               {patches[it.key] !== undefined
                 ? patches[it.key].trim()
-                  ? <PatchDiff key={`${it.key}:${fullFile}:${split}`} patch={patches[it.key]} options={diffOptionsFor(it)} selectedLines={sel?.key === it.key ? sel.range : null} disableWorkerPool />
+                  ? <PatchDiff<{ index: number }> key={`${it.key}:${fullFile}:${split}`} patch={patches[it.key]} options={diffOptionsFor(it)} selectedLines={sel?.key === it.key ? sel.range : null} lineAnnotations={annotationsFor(it)} renderAnnotation={() => <div className="hunk-read">✓ hunk read</div>} disableWorkerPool />
                   : <div className="empty">{it.path}: no textual diff (binary or empty)</div>
                 : <div className="empty">loading {it.path}…</div>}
             </div>
@@ -510,12 +578,13 @@ function Review({ prKey }: { prKey: string }) {
         <div className="palette" onClick={() => setPalette(null)}>
           <div className="box" onClick={(e) => e.stopPropagation()}>
             <div className="mode">
-              <span><b>{palette.mode === 'open' ? 'open file' : palette.mode === 'search' ? 'search repo' : palette.mode === 'outline' ? 'outline' : palette.title}</b></span>
+              <span><b>{palette.mode === 'open' ? 'open file' : palette.mode === 'search' ? 'search repo' : palette.mode === 'outline' ? 'outline' : palette.mode === 'history' ? 'history' : palette.title}</b></span>
+              {palette.mode === 'history' && <span>{palette.title} · who last touched these lines, at the PR head</span>}
               {palette.mode === 'outline' && <span>{palette.title}</span>}
               {palette.mode === 'locs' && <span>{palette.rows.length} places</span>}
               {palette.mode === 'search' && <span>{palette.rows.length ? `${palette.rows.length} hits` : 'git grep, case-insensitive'}</span>}
             </div>
-            {palette.mode !== 'locs' && (
+            {palette.mode !== 'locs' && palette.mode !== 'history' && (
               <input autoFocus value={palette.query} placeholder={palette.mode === 'open' ? 'file name…' : palette.mode === 'search' ? 'text to find…' : 'symbol…'} onChange={(e) => { const v = e.target.value; setPalette((p) => (p ? { ...p, query: v } : p)); setPaletteIdx(0); }} />
             )}
             <div className="list">
