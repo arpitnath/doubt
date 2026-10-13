@@ -42,7 +42,7 @@ export function Landing({ onOpen }: { onOpen: (key: string) => void }) {
                 <span className="num">#{p.number}</span>
                 <span className="title">{p.title}</span>
                 <span className="meta">{p.owner}/{p.repo} · {p.author}</span>
-                <span className="progress">{p.read}/{p.files}{p.open ? ' · open' : ''}</span>
+                <span className="progress">{p.files ? `${p.read} of ${p.files} files read` : 'open to load'}{p.open ? ' · open now' : ''}</span>
               </div>
             ))}
           </div>
