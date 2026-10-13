@@ -49,6 +49,7 @@ function Review({ prKey }: { prKey: string }) {
   const [cursor, setCursor] = useState<{ key: string; hunk: number } | null>(null); // the hunk last jumped to
   const [since, setSince] = useState(false); // interdiff: only what changed since the previous head
   const [showDesc, setShowDesc] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [openAnswers, setOpenAnswers] = useState<Set<string>>(new Set()); // doubt ids whose inline answer is expanded
   const changedSet = useMemo(() => new Set(pr?.changedSince ?? []), [pr?.changedSince]);
   const agentRef = useRef<AgentHandle>(null);
@@ -464,6 +465,8 @@ function Review({ prKey }: { prKey: string }) {
       else if (e.key === 'w') setSplit((v) => !v);
       else if (e.key === 's') switchTab(tab === 'files' ? 'commits' : tab === 'commits' ? 'repo' : tab === 'repo' ? 'doubts' : 'files');
       else if (e.key === 'v') setShowDesc((x) => !x);
+      else if (e.key === '?') setShowHelp((x) => !x);
+      else if (e.key === 'Escape') setShowHelp(false);
       else if (e.key === 'c' && tab === 'commits') {
         if (view?.kind === 'chunk') { const c = pr?.chunks.find((k) => k.id === view.id); if (c) setView({ kind: 'commit', sha: c.sha }); }
         else if (view?.kind === 'commit') { const c = pr?.chunks.find((k) => k.sha === view.sha); if (c) setView({ kind: 'chunk', id: c.id }); }
@@ -563,7 +566,7 @@ function Review({ prKey }: { prKey: string }) {
           <button className={tab === 'commits' ? 'on' : ''} onClick={() => switchTab('commits')}>Commits</button>
           <button className={tab === 'repo' ? 'on' : ''} onClick={() => switchTab('repo')}>Repo</button>
           <button className={tab === 'doubts' ? 'on' : ''} onClick={() => switchTab('doubts')}>Doubts{pr.doubts.filter((d) => d.path && !d.resolved).length ? ` ${pr.doubts.filter((d) => d.path && !d.resolved).length}` : ''}</button>
-          <span className="hint"><kbd>s</kbd> <kbd>p</kbd> <kbd>g</kbd> <kbd>o</kbd></span>
+
         </div>
         {tab === 'files' && <Tree paths={pr.files.map((f) => f.path)} meta={fileByPath} readFiles={pr.readFiles} changed={changedSet} signals={pr.signals} current={currentPath} onPick={(p) => openPath(p)} />}
         {tab === 'repo' && (tree.length ? <Tree paths={tree} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={(p) => openPath(p)} repo /> : <div className="empty">loading tree…</div>)}
@@ -607,11 +610,11 @@ function Review({ prKey }: { prKey: string }) {
       <div className="main" onMouseDown={(e) => { if (!(e.target as HTMLElement).closest('input,textarea')) (e.currentTarget.closest('.app') as HTMLElement | null)?.focus(); }}>
         <div className="bar">
           {view?.kind === 'repo'
-            ? <><span className="path">{view.path}</span><span>at PR head · not changed by this PR</span></>
+            ? <><span className="path">{view.path}</span><span className="meta2">at PR head · not changed by this PR</span></>
             : commit
-              ? <><span className="path">{commit.sha.slice(0, 7)} {commit.subject}</span><span>{items.length} files · {commit.author}</span></>
+              ? <><span className="path">{commit.sha.slice(0, 7)} {commit.subject}</span><span className="meta2">{items.length} files · {commit.author}</span></>
               : head
-                ? <><span className="path">{head.path}</span><span>{head.oldRev === 'base' ? (since && changedSet.has(head.path) ? `since ${pr.prevHeadSha?.slice(0, 7)}` : 'vs merge-base') : head.newRev.slice(0, 7)} · {head.status} · +{head.adds}/-{head.dels}{head.read ? ' · read' : ''}{changedSet.has(head.path) ? <> · changed since your read, <kbd>i</kbd> {since ? 'whole diff' : 'only what changed'}</> : null}</span></>
+                ? <><span className="path">{head.path}</span><span className="meta2">{head.oldRev === 'base' ? (since && changedSet.has(head.path) ? `since ${pr.prevHeadSha?.slice(0, 7)}` : 'vs merge-base') : head.newRev.slice(0, 7)} · {head.status} · +{head.adds}/-{head.dels}{head.read ? ' · read' : ''}{changedSet.has(head.path) ? <> · changed since your read, <kbd>i</kbd> {since ? 'whole diff' : 'only what changed'}</> : null}</span></>
                 : <span>nothing left to read</span>}
           {head && (pr.signals?.[head.path] ?? []).length > 0 && (
             <span className="sigline">{(pr.signals?.[head.path] ?? []).map((x) => {
@@ -620,12 +623,8 @@ function Review({ prKey }: { prKey: string }) {
             })}</span>
           )}
           <span className="keys">
-            <kbd>v</kbd> {showDesc ? 'hide' : 'desc'} &nbsp;
-            <kbd>u</kbd> read &nbsp; <kbd>x</kbd> unmark &nbsp; <kbd>j</kbd>/<kbd>k</kbd> move &nbsp;
-            <kbd>e</kbd> {fullFile ? 'hunks only' : 'full file'} &nbsp; <kbd>w</kbd> {split ? 'unified' : 'split'} &nbsp;
-            <kbd>space</kbd> hunk{flatHunks.length ? ` ${cursor ? flatHunks.findIndex((x) => x.key === cursor.key && x.hunk.index === cursor.hunk) + 1 : 0}/${flatHunks.length}` : ''} &nbsp; <kbd>m</kbd> mark &nbsp; <kbd>b</kbd> history &nbsp;
-            <kbd>y</kbd> ref &nbsp; <kbd>⌘</kbd>click def &nbsp; <kbd>d</kbd> comment &nbsp; <kbd>a</kbd> agent
-            {tab === 'commits' && <> &nbsp; <kbd>c</kbd> {view?.kind === 'commit' ? 'one file' : 'whole commit'} &nbsp; <kbd>[</kbd>/<kbd>]</kbd> file</>}
+            {flatHunks.length ? <span className="hunkpos">hunk {cursor ? flatHunks.findIndex((x) => x.key === cursor.key && x.hunk.index === cursor.hunk) + 1 : 0}/{flatHunks.length}</span> : null}
+            <kbd>?</kbd> keys
           </span>
         </div>
         {showDesc && (
@@ -688,6 +687,47 @@ function Review({ prKey }: { prKey: string }) {
           <div className="ref">{commentTarget.range ? `${commentTarget.path}:${commentTarget.range.start}-${commentTarget.range.end}` : commentTarget.path}</div>
           <textarea ref={commentRef} rows={4} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="what should the agent look at here?" />
           <div className="to">to <b>{agentRef.current?.activeTitle() ?? 'no session open, press a'}</b> · <kbd>⌘</kbd><kbd>enter</kbd> send · <kbd>esc</kbd> cancel</div>
+        </div>
+      )}
+      {showHelp && (
+        <div className="palette" onClick={() => setShowHelp(false)}>
+          <div className="box help" onClick={(e) => e.stopPropagation()}>
+            <div className="mode"><span><b>keys</b></span><span>press <kbd>?</kbd> or <kbd>esc</kbd> to close</span></div>
+            <div className="cols">
+              <div>
+                <h4>read</h4>
+                <div><kbd>u</kbd> read the shown file or commit, next unread</div>
+                <div><kbd>x</kbd> unmark</div>
+                <div><kbd>n</kbd> mark every noise file read</div>
+                <div><kbd>space</kbd> / <kbd>⇧space</kbd> next / previous hunk</div>
+                <div><kbd>m</kbd> mark the current hunk read</div>
+                <div><kbd>j</kbd> / <kbd>k</kbd> next / previous file or commit</div>
+                <div><kbd>[</kbd> / <kbd>]</kbd> files inside a stacked commit</div>
+                <h4>view</h4>
+                <div><kbd>e</kbd> whole file with inline hunks, or hunks only</div>
+                <div><kbd>w</kbd> split or unified</div>
+                <div><kbd>c</kbd> in Commits: whole commit or one file</div>
+                <div><kbd>v</kbd> PR description</div>
+                <div><kbd>i</kbd> only what changed since the previous head</div>
+                <div><kbd>s</kbd> cycle Changes, Commits, Repo, Doubts</div>
+              </div>
+              <div>
+                <h4>find</h4>
+                <div><kbd>p</kbd> open any file by name</div>
+                <div><kbd>g</kbd> search the repo</div>
+                <div><kbd>o</kbd> outline of the file in focus</div>
+                <div><kbd>b</kbd> who last touched the selected lines</div>
+                <div><kbd>⌘</kbd>click go to definition · <kbd>⌘⌥</kbd>click references</div>
+                <h4>take out</h4>
+                <div><kbd>y</kbd> copy path:line · <kbd>Y</kbd> copy with context</div>
+                <h4>agent</h4>
+                <div><kbd>a</kbd> agent sidebar: your Claude Code sessions, as terminals</div>
+                <div><kbd>d</kbd> review comment on the selected lines, <kbd>⌘enter</kbd> sends</div>
+                <h4>sync</h4>
+                <div><kbd>r</kbd> refetch the head, keep marks for untouched files</div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
       {toast && <div className="toast">{toast}</div>}

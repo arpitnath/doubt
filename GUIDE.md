@@ -110,6 +110,7 @@ Paste a PR URL, or click one you opened before. First time on a repo takes 20 to
 | `r` | sync the head on demand |
 | `i` | only what changed since the previous head, for a changed file |
 | `v` | PR description on or off |
+| `?` | every key, on screen |
 | `Esc` | close any palette |
 
 Select lines by clicking a line number and dragging. That selection is what `y`, `Y` and the outline treat as the file in focus; in a stacked commit it also picks which file they mean.

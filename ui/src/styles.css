@@ -184,3 +184,13 @@ kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: 
 .desc code { background: var(--bg); padding: 0 4px; border-radius: 4px; }
 .desc ul { padding-left: 18px; }
 .desc .empty { color: var(--muted); }
+.main .bar { gap: 14px; }
+.main .bar .path { flex: 1; min-width: 0; }
+.main .bar .meta2 { white-space: nowrap; color: var(--muted); }
+.main .bar .keys { margin-left: 0; display: flex; gap: 12px; align-items: center; }
+.main .bar .hunkpos { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.palette .box.help { width: 760px; }
+.help .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; padding: 10px 14px 16px; }
+.help h4 { margin: 10px 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.help .cols > div > div { padding: 3px 0; color: var(--text); }
+.help kbd { margin-right: 4px; }

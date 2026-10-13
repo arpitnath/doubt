@@ -48,6 +48,7 @@ Select lines by clicking line numbers; that selection is what `y`, `Y` and the o
 | `r` | sync: refetch the head on demand, keep marks for untouched files, badge what changed |
 | `i` | for a file that changed since your read: only what changed, or the whole diff |
 | `v` | show or hide the PR description |
+| `?` | every key, on screen |
 | `e` | whole file with inline hunks, or hunks only |
 | `w` | split or unified |
 | `c` | in Commits: whole commit or one file |
