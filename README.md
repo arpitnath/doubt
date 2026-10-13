@@ -22,16 +22,14 @@ The center shows either one commit with every file it touched stacked (click a c
 
 | key | does |
 |---|---|
-| `u` | understood: settle the shown file or the whole commit, show the next unjudged one |
-| `d` | open the doubt box for the shown file or commit (select lines in a diff first to anchor it) |
-| `t` | take: pull the shown file or commit into the Claude session with no question; it replies with a short note |
+| `u` | read: settle the shown file or the whole commit, show the next unread one |
+| `x` | unmark the shown file or commit |
 | `c` | switch between whole-commit and single-file view |
 | `j` / `k` | move to the next or previous commit or file without judging |
-| `enter` / `esc` | send / cancel in the doubt box |
 
 ## Claude session
 
-On first open the right pane lists Claude Code sessions that mention this repo in their working directory. Pick one and the PR session is a **fork** of it (its knowledge, none of its risk: the original is never written to), or start fresh. The first message asks for the PR's shape. Every doubt resumes that one session, in plan mode, with the PR worktree as its working directory.
+Out of the UI for now. The daemon still serves `/api/sessions`, `/api/session` (fork or fresh, returns the PR's shape) and `/api/doubt` (a question or a `take` on a file or commit), all streaming over SSE, so the room can come back when the session flow is right.
 
 ## Layout
 
