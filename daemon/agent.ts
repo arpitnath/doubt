@@ -79,7 +79,29 @@ export function shapePrompt(s: PrState): string {
   ].join('\n');
 }
 
-export function doubtPrompt(chunk: Chunk, lines: { start: number; end: number } | undefined, question: string): string {
+// Every prompt names the commit's diff file: the session has no shell, so it cannot run git itself.
+export function doubtPrompt(chunk: Chunk, lines: { start: number; end: number } | undefined, question: string, diffFile: string): string {
   const where = lines ? `${chunk.path}:${lines.start}-${lines.end}` : chunk.path;
-  return `Doubt on ${chunk.sha.slice(0, 7)} ${where}\n${question}`;
+  return `Doubt on ${chunk.sha.slice(0, 7)} ${where}\n(this commit's diff is at ${diffFile}; this file's part is under "diff --git a/${chunk.path}")\n${question}`;
+}
+
+export function commitDoubtPrompt(sha: string, subject: string, question: string, diffFile: string): string {
+  return `Doubt on commit ${sha.slice(0, 7)} "${subject}" (the whole commit, every file it touched; its diff is at ${diffFile})\n${question}`;
+}
+
+// "take": pull a file or a commit into the session's context without a question.
+export function takePrompt(target: { chunk: Chunk } | { sha: string; subject: string; paths: string[] }, diffFile: string): string {
+  if ('chunk' in target) {
+    return [
+      `Take into context: ${target.chunk.sha.slice(0, 7)} ${target.chunk.path}.`,
+      `Read the file as it is at the PR head, and this commit's diff at ${diffFile} (this file's part is under "diff --git a/${target.chunk.path}"). Keep it in mind for later questions.`,
+      `Reply in at most three lines: what the file is for, what this commit changed in it, and what else in the repo calls or depends on the changed part.`
+    ].join('\n');
+  }
+  return [
+    `Take into context: commit ${target.sha.slice(0, 7)} "${target.subject}", touching ${target.paths.length} files:`,
+    ...target.paths.map((p) => `- ${p}`),
+    `Read its diff at ${diffFile} and the touched files at the PR head. Keep it in mind for later questions.`,
+    `Reply in at most five lines: what this commit does as one change, and which of its files carries the real behaviour change.`
+  ].join('\n');
 }

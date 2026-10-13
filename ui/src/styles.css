@@ -28,7 +28,15 @@ kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: 
 .queue { border-right: 1px solid var(--line); overflow: auto; background: var(--panel); }
 .commit { padding: 10px 12px 4px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
 .commit:first-child { border-top: 0; }
+.commit { cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; border-left: 3px solid transparent; }
+.commit:hover { color: var(--text); }
+.commit.current { border-left-color: var(--accent); color: var(--text); background: var(--bg); }
+.commit.done { opacity: 0.5; }
+.commit .count { margin-left: auto; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .commit .sha { font-family: ui-monospace, Menlo, monospace; color: var(--accent); margin-right: 6px; }
+.stack { margin: 10px 0 18px; }
+.stack.understood { opacity: 0.45; }
+.msg.take { color: var(--muted); border-left: 2px solid var(--muted); padding-left: 10px; font-style: italic; }
 .chunk { display: flex; gap: 8px; align-items: center; padding: 5px 12px 5px 18px; cursor: pointer; border-left: 3px solid transparent; }
 .chunk:hover { background: var(--bg); }
 .chunk.current { border-left-color: var(--accent); background: var(--bg); }

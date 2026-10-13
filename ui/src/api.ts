@@ -22,8 +22,8 @@ export const getPr = (): Promise<PrState> => fetch('/api/pr').then((r) => r.json
 export const getDiff = (chunkId: string): Promise<{ chunk: Chunk; patch: string }> =>
   fetch(`/api/diff?chunk=${encodeURIComponent(chunkId)}`).then((r) => r.json());
 export const getSessions = (): Promise<SessionInfo[]> => fetch('/api/sessions').then((r) => r.json());
-export const setVerdict = (chunkId: string, verdict: Verdict): Promise<unknown> =>
-  fetch('/api/verdict', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chunkId, verdict }) });
+export const setVerdict = (target: { chunkId: string } | { sha: string }, verdict: Verdict): Promise<unknown> =>
+  fetch('/api/verdict', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...target, verdict }) });
 
 export async function stream(path: string, body: unknown, onEvent: (ev: AgentEvent) => void): Promise<void> {
   try {

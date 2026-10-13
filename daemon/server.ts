@@ -5,10 +5,10 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
-import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, type Commit } from './git.js';
+import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, commitDiff, type Commit } from './git.js';
 import { ghToken, prMeta } from './github.js';
 import { load, save, stateKey, WORK_ROOT, type PrState, type Chunk, type Verdict } from './state.js';
-import { ask, sessionsFor, shapePrompt, doubtPrompt, type AgentEvent } from './agent.js';
+import { ask, sessionsFor, shapePrompt, doubtPrompt, commitDoubtPrompt, takePrompt, type AgentEvent } from './agent.js';
 
 const args = process.argv.slice(2);
 const prUrl = args.find((a) => a.startsWith('http'));
@@ -129,12 +129,15 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
 
   if (req.method === 'POST' && url.pathname === '/api/verdict') {
     const body = await readJson(req);
-    const chunk = s.chunks.find((c) => c.id === body.chunkId);
-    if (!chunk) return json(res, 404, { error: 'unknown chunk' });
     if (!VERDICTS.includes(body.verdict as Verdict)) return json(res, 400, { error: 'bad verdict' });
-    chunk.verdict = body.verdict as Verdict;
+    // one chunk, or every chunk of a commit when `sha` is given
+    const targets = typeof body.sha === 'string'
+      ? s.chunks.filter((c) => c.sha === body.sha)
+      : s.chunks.filter((c) => c.id === body.chunkId);
+    if (!targets.length) return json(res, 404, { error: 'unknown chunk' });
+    for (const c of targets) c.verdict = body.verdict as Verdict;
     save(s);
-    return json(res, 200, { ok: true });
+    return json(res, 200, { ok: true, count: targets.length });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/sessions') {
@@ -161,22 +164,46 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
   }
 
+  // One route for three moves: a doubt on a file chunk, a doubt on a whole commit (`sha`, no chunkId),
+  // or a "take" (`take: true`): pull the file or commit into the session with no question and no verdict change.
   if (req.method === 'POST' && url.pathname === '/api/doubt') {
     if (busy) return json(res, 409, { error: 'busy' });
     if (!s.sessionId) return json(res, 400, { error: 'no session yet' });
     busy = true;
     try {
       const body = await readJson(req);
-      const chunk = s.chunks.find((c) => c.id === body.chunkId);
-      if (!chunk) { busy = false; return json(res, 404, { error: 'unknown chunk' }); }
+      const take = body.take === true;
       const lines = body.lines as { start: number; end: number } | undefined;
       const question = String(body.question || '').trim();
-      if (!question) { busy = false; return json(res, 400, { error: 'empty question' }); }
-      chunk.verdict = 'doubt';
-      const doubt = { id: `${Date.now().toString(36)}`, chunkId: chunk.id, lines, question, answer: '', at: Date.now() };
+      if (!take && !question) { busy = false; return json(res, 400, { error: 'empty question' }); }
+
+      let message: string;
+      let chunkId: string;
+      if (typeof body.chunkId === 'string') {
+        const chunk = s.chunks.find((c) => c.id === body.chunkId);
+        const commit = chunk && commitBySha.get(chunk.sha);
+        if (!chunk || !commit) { busy = false; return json(res, 404, { error: 'unknown chunk' }); }
+        const diff = await commitDiff(s.dir, commit);
+        chunkId = chunk.id;
+        message = take ? takePrompt({ chunk }, diff) : doubtPrompt(chunk, lines, question, diff);
+        if (!take) chunk.verdict = 'doubt';
+      } else if (typeof body.sha === 'string') {
+        const commit = commitBySha.get(body.sha);
+        const paths = s.chunks.filter((c) => c.sha === body.sha).map((c) => c.path);
+        if (!commit || !paths.length) { busy = false; return json(res, 404, { error: 'unknown commit' }); }
+        const diff = await commitDiff(s.dir, commit);
+        chunkId = `${commit.sha.slice(0, 7)}:*`;
+        message = take ? takePrompt({ sha: commit.sha, subject: commit.subject, paths }, diff) : commitDoubtPrompt(commit.sha, commit.subject, question, diff);
+        if (!take) for (const c of s.chunks) if (c.sha === body.sha && c.verdict === 'none') c.verdict = 'doubt';
+      } else {
+        busy = false;
+        return json(res, 400, { error: 'chunkId or sha required' });
+      }
+
+      const doubt = { id: `${Date.now().toString(36)}`, chunkId, lines, question: take ? '(take)' : question, answer: '', at: Date.now() };
       s.doubts.push(doubt);
       save(s);
-      return await streamAgent(res, ask({ dir: s.dir, message: doubtPrompt(chunk, lines, question), sessionId: s.sessionId }), (ev) => {
+      return await streamAgent(res, ask({ dir: s.dir, message, sessionId: s.sessionId }), (ev) => {
         doubt.answer = ev.text;
         save(s);
       });

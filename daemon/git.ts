@@ -143,6 +143,15 @@ export async function fileDiff(dir: string, commit: Commit, path: string): Promi
     : ['diff-tree', '--no-commit-id', '-r', '--root', '-p', '--no-color', commit.sha, '--', path]);
 }
 
+// The session has no shell, so every diff it may need is written where it can Read it.
+export async function commitDiff(dir: string, commit: Commit): Promise<string> {
+  const scratch = join(dir, '.doubt', 'commits');
+  mkdirSync(scratch, { recursive: true });
+  const file = join(scratch, `${commit.sha.slice(0, 7)}.diff`);
+  if (!existsSync(file)) writeFileSync(file, await git(dir, diffArgs(commit, ['-p', '--no-color'])));
+  return file;
+}
+
 export async function fullDiff(dir: string, baseSha: string, headSha: string): Promise<string> {
   const text = await git(dir, ['diff', '--no-color', baseSha, headSha]);
   const scratch = join(dir, '.doubt');
