@@ -18,11 +18,15 @@ The daemon clones the base repo (blob-filtered) under `~/.doubt/work`, fetches t
 
 ## Keys
 
+The center shows either one commit with every file it touched stacked (click a commit in the queue, or `c`), or one file (click a file, or `c` again). Keys act on what is shown. Click the page once after it opens so it has keyboard focus.
+
 | key | does |
 |---|---|
-| `u` | this chunk is understood; hide it, show the next unjudged one |
-| `d` | open the doubt box for this chunk (select lines in the diff first to anchor it) |
-| `j` / `k` | move without judging |
+| `u` | understood: settle the shown file or the whole commit, show the next unjudged one |
+| `d` | open the doubt box for the shown file or commit (select lines in a diff first to anchor it) |
+| `t` | take: pull the shown file or commit into the Claude session with no question; it replies with a short note |
+| `c` | switch between whole-commit and single-file view |
+| `j` / `k` | move to the next or previous commit or file without judging |
 | `enter` / `esc` | send / cancel in the doubt box |
 
 ## Claude session
