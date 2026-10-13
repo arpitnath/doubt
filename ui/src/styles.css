@@ -35,6 +35,28 @@ kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: 
 .commit.done { opacity: 0.5; }
 .commit .count { margin-left: auto; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .commit .sha { font-family: ui-monospace, Menlo, monospace; color: var(--accent); margin-right: 6px; }
+.tabs { display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.tabs button { padding: 3px 10px; border-color: transparent; color: var(--muted); }
+.tabs button.on { color: var(--text); border-color: var(--line); background: var(--bg); }
+.tabs .hint { margin-left: auto; }
+.tree { padding: 6px 0 20px; }
+.node { display: flex; align-items: center; gap: 6px; padding: 3px 10px 3px 0; cursor: pointer; white-space: nowrap; border-left: 3px solid transparent; }
+.node:hover { background: var(--bg); }
+.node.dir { color: var(--muted); }
+.node.dir.done { opacity: 0.55; }
+.node .arrow { width: 12px; color: var(--muted); font-size: 11px; }
+.node .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.node .count, .node .stat { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); }
+.node .mark { width: 12px; font-size: 11px; color: var(--ok); }
+.node .status { width: 10px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); }
+.node.st-A .status { color: var(--ok); }
+.node.st-D .status { color: var(--doubt); }
+.node.st-R .status, .node.st-C .status { color: var(--accent); }
+.node.file.current { border-left-color: var(--accent); background: var(--bg); }
+.node.file.read { opacity: 0.45; }
+.node.file.read .name { text-decoration: line-through; }
+.node.file.noise .name { color: var(--muted); }
+.node .badge { font-size: 10px; padding: 0 5px; border-radius: 4px; background: var(--line); color: var(--muted); }
 .stack { margin: 10px 0 18px; }
 .stack.understood { opacity: 0.45; }
 .msg.take { color: var(--muted); border-left: 2px solid var(--muted); padding-left: 10px; font-style: italic; }

@@ -50,6 +50,7 @@ export interface CheckoutInput {
   cloneUrl: string; // base repo; GitHub serves refs/pull/N/head there even for forks
   headSha: string;
   baseRef: string;
+  apiBaseSha?: string; // GitHub's base commit; used when the PR is already merged into baseRef
   token: string;
   workRoot: string;
 }
@@ -57,7 +58,7 @@ export interface CheckoutInput {
 export interface Checkout { dir: string; baseSha: string }
 
 export async function checkout(input: CheckoutInput): Promise<Checkout> {
-  const { ref, cloneUrl, headSha, baseRef, token, workRoot } = input;
+  const { ref, cloneUrl, headSha, baseRef, apiBaseSha, token, workRoot } = input;
   const dir = join(workRoot, `${ref.owner}-${ref.repo}-${ref.number}`);
   const env = authEnv(token);
   mkdirSync(workRoot, { recursive: true });
@@ -72,7 +73,13 @@ export async function checkout(input: CheckoutInput): Promise<Checkout> {
   // '+' so a force-pushed head or a rewritten base still fetches on a reused work dir.
   await git(dir, ['fetch', '--quiet', 'origin', `+refs/pull/${ref.number}/head:refs/doubt/pr`, `+${baseRef}:refs/doubt/base`], env);
   await git(dir, ['checkout', '--quiet', '--detach', headSha]);
-  const baseSha = (await git(dir, ['merge-base', 'HEAD', 'refs/doubt/base'])).trim();
+  let baseSha = (await git(dir, ['merge-base', 'HEAD', 'refs/doubt/base'])).trim();
+  // A merged PR is an ancestor of its base branch, so the merge-base is the head itself and the diff
+  // would be empty. GitHub's base.sha is the base the PR was compared against; it is reachable from
+  // the fetched branch, so merge-base against it recovers the PR's own diff.
+  if (baseSha === headSha && apiBaseSha) {
+    try { baseSha = (await git(dir, ['merge-base', 'HEAD', apiBaseSha])).trim(); } catch { /* keep headSha; the PR shows empty */ }
+  }
 
   // Keep our scratch files out of git status without touching the repo's .gitignore.
   const exclude = join(dir, '.git', 'info', 'exclude');
@@ -150,6 +157,72 @@ export async function commitDiff(dir: string, commit: Commit): Promise<string> {
   const file = join(scratch, `${commit.sha.slice(0, 7)}.diff`);
   if (!existsSync(file)) writeFileSync(file, await git(dir, diffArgs(commit, ['-p', '--no-color'])));
   return file;
+}
+
+// ---- PR-wide (merge-base..head) ---------------------------------------------------------------
+
+export type FileKind = 'src' | 'test' | 'docs' | 'config' | 'generated' | 'snapshot' | 'lock';
+
+// ponytail: path heuristics, no AST. Good enough to park what no human needs to read first.
+export function kindOf(path: string): FileKind {
+  const p = path.toLowerCase();
+  const base = p.slice(p.lastIndexOf('/') + 1);
+  if (/^(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|cargo\.lock|go\.sum|poetry\.lock|gemfile\.lock|composer\.lock)$/.test(base)) return 'lock';
+  if (/\.snap$|__snapshots__\//.test(p)) return 'snapshot';
+  if (/(^|\/)(dist|build|out|\.next|coverage|vendor)\/|\.min\.(js|css)$|\.generated\.|\.pb\.go$|_pb2\.py$|\.d\.ts$/.test(p)) return 'generated';
+  if (/\.(md|mdx|rst|txt)$|(^|\/)\.changeset\/|(^|\/)docs?\//.test(p)) return 'docs';
+  if (/\.(spec|test)\.[cm]?[jt]sx?$|(^|\/)(tests?|__tests__|e2e|spec|fixtures?)\//.test(p)) return 'test';
+  if (/\.(json|ya?ml|toml|ini|env|cfg|conf)$|(^|\/)\.[^/]+$|(^|\/)(config|\.github|\.vscode)\//.test(p)) return 'config';
+  return 'src';
+}
+
+export interface PrFile {
+  path: string;
+  oldPath?: string; // renames
+  status: string; // A M D R C
+  adds: number;
+  dels: number;
+  oldBlob: string;
+  newBlob: string;
+  kind: FileKind;
+  wsOnly: boolean; // the change disappears under -w
+}
+
+export async function prFiles(dir: string, baseSha: string, headSha: string): Promise<PrFile[]> {
+  const raw = await git(dir, ['diff-tree', '-r', '-z', '--raw', '-M', baseSha, headSha]);
+  const counts = parseNumstat(await git(dir, ['diff-tree', '-r', '-z', '--numstat', '-M', baseSha, headSha]));
+  const wsCounts = parseNumstat(await git(dir, ['diff-tree', '-r', '-z', '--numstat', '-w', '-M', baseSha, headSha]));
+
+  const files: PrFile[] = [];
+  const parts = raw.split('\0');
+  for (let i = 0; i < parts.length; i++) {
+    const rec = parts[i];
+    if (!rec.startsWith(':')) continue;
+    const [, , oldBlob, newBlob, st] = rec.slice(1).split(' ');
+    const status = st[0];
+    let oldPath: string | undefined;
+    let path: string;
+    if (status === 'R' || status === 'C') { oldPath = parts[++i]; path = parts[++i]; } else { path = parts[++i]; }
+    if (!path) continue;
+    const c = counts.get(path) || { adds: 0, dels: 0 };
+    const w = wsCounts.get(path);
+    const wsOnly = c.adds + c.dels > 0 && (!w || w.adds + w.dels === 0);
+    files.push({ path, oldPath, status, adds: c.adds, dels: c.dels, oldBlob, newBlob, kind: kindOf(path), wsOnly });
+  }
+  return files;
+}
+
+export async function prFileDiff(dir: string, baseSha: string, headSha: string, path: string, oldPath?: string): Promise<string> {
+  const paths = oldPath && oldPath !== path ? [oldPath, path] : [path];
+  return git(dir, ['diff', '--no-color', '-M', baseSha, headSha, '--', ...paths]);
+}
+
+export async function fileAt(dir: string, rev: string, path: string): Promise<string | null> {
+  try {
+    return await git(dir, ['show', `${rev}:${path}`]);
+  } catch {
+    return null; // absent on that side
+  }
 }
 
 export async function fullDiff(dir: string, baseSha: string, headSha: string): Promise<string> {

@@ -1,9 +1,11 @@
-// One JSON file per PR under ~/.doubt/state, keyed by repo, number and head SHA.
-// A force-push changes the key, which is the right behaviour: the queue starts over.
+// One JSON file per PR under ~/.doubt/state, keyed by repo and number.
+// Chunk verdicts are the truth. A file counts as read when every chunk of it is read.
+// `readFiles` remembers the blob pair a fully read file had, so after a push only
+// files whose content actually changed come back as unread.
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { Commit } from './git.js';
+import type { Commit, PrFile } from './git.js';
 
 export type Verdict = 'none' | 'understood' | 'doubt';
 
@@ -43,6 +45,8 @@ export interface PrState {
   shape?: string;
   commits: Commit[];
   chunks: Chunk[];
+  files: PrFile[];
+  readFiles: Record<string, string>; // path -> `${oldBlob}:${newBlob}` when fully read
   doubts: Doubt[];
 }
 
@@ -50,9 +54,11 @@ export const DOUBT_HOME = join(homedir(), '.doubt');
 export const WORK_ROOT = join(DOUBT_HOME, 'work');
 const STATE_ROOT = join(DOUBT_HOME, 'state');
 
-export function stateKey(s: Pick<PrState, 'owner' | 'repo' | 'number' | 'headSha'>): string {
-  return `${s.owner}-${s.repo}-${s.number}-${s.headSha.slice(0, 7)}`;
+export function stateKey(s: Pick<PrState, 'owner' | 'repo' | 'number'>): string {
+  return `${s.owner}-${s.repo}-${s.number}`;
 }
+
+export const blobPair = (f: PrFile): string => `${f.oldBlob}:${f.newBlob}`;
 
 export function load(key: string): PrState | null {
   const file = join(STATE_ROOT, `${key}.json`);
@@ -60,10 +66,29 @@ export function load(key: string): PrState | null {
   return JSON.parse(readFileSync(file, 'utf8')) as PrState;
 }
 
+// Recompute readFiles from chunk verdicts, then persist.
 export function save(state: PrState): void {
+  const byPath = new Map<string, Chunk[]>();
+  for (const c of state.chunks) byPath.set(c.path, [...(byPath.get(c.path) || []), c]);
+  const next: Record<string, string> = {};
+  for (const f of state.files) {
+    const chunks = byPath.get(f.path) || [];
+    if (chunks.length && chunks.every((c) => c.verdict !== 'none')) next[f.path] = blobPair(f);
+  }
+  state.readFiles = next;
+
   mkdirSync(STATE_ROOT, { recursive: true });
   const file = join(STATE_ROOT, `${stateKey(state)}.json`);
   const tmp = `${file}.tmp`;
   writeFileSync(tmp, JSON.stringify(state, null, 2));
   renameSync(tmp, file); // ponytail: write-then-rename so a crash never leaves a half file
+}
+
+// After a push: a file read before, whose blob pair did not change, stays read.
+export function carryOver(fresh: PrState, prev: PrState | null): void {
+  if (!prev?.readFiles) return;
+  for (const f of fresh.files) {
+    if (prev.readFiles[f.path] !== blobPair(f)) continue;
+    for (const c of fresh.chunks) if (c.path === f.path && c.verdict === 'none') c.verdict = 'understood';
+  }
 }

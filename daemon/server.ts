@@ -1,13 +1,14 @@
 // doubt daemon. Usage: tsx daemon/server.ts <github-pr-url> [--port 7880] [--no-open]
-// Serves the UI from ui/dist, the PR state, per-chunk diffs, and streams Claude answers over SSE.
+// Serves the UI from ui/dist, the PR state, per-chunk and per-file diffs, full file contents,
+// and streams Claude answers over SSE (the UI does not use those routes right now).
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
-import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, commitDiff, type Commit } from './git.js';
+import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, commitDiff, prFiles, prFileDiff, fileAt, type Commit } from './git.js';
 import { ghToken, prMeta } from './github.js';
-import { load, save, stateKey, WORK_ROOT, type PrState, type Chunk, type Verdict } from './state.js';
+import { load, save, carryOver, stateKey, WORK_ROOT, type PrState, type Chunk, type Verdict } from './state.js';
 import { ask, sessionsFor, shapePrompt, doubtPrompt, commitDoubtPrompt, takePrompt, type AgentEvent } from './agent.js';
 
 const args = process.argv.slice(2);
@@ -22,19 +23,23 @@ const noOpen = args.includes('--no-open');
 const here = dirname(fileURLToPath(import.meta.url));
 const uiDist = join(here, '..', 'ui', 'dist');
 
-// ---- boot: meta, checkout, commits, chunks, state ---------------------------------------------
+// ---- boot: meta, checkout, commits, chunks, files, state ---------------------------------------
 
 const ref = parsePrUrl(prUrl);
 console.error(`> PR #${ref.number} ${ref.owner}/${ref.repo}: fetching metadata`);
 const meta = await prMeta(ref);
 const token = await ghToken();
 console.error(`> checking out ${meta.headSha.slice(0, 7)} (${meta.headRef} -> ${meta.baseRef})`);
-const co = await checkout({ ref, cloneUrl: meta.cloneUrl, headSha: meta.headSha, baseRef: meta.baseRef, token, workRoot: WORK_ROOT });
+const co = await checkout({ ref, cloneUrl: meta.cloneUrl, headSha: meta.headSha, baseRef: meta.baseRef, apiBaseSha: meta.baseSha, token, workRoot: WORK_ROOT });
 
-const key = stateKey({ owner: ref.owner, repo: ref.repo, number: ref.number, headSha: meta.headSha });
-let state: PrState | null = load(key);
+const key = stateKey({ owner: ref.owner, repo: ref.repo, number: ref.number });
+const prev = load(key);
+let state: PrState;
 
-if (!state) {
+if (prev && prev.headSha === meta.headSha && prev.files) {
+  state = prev;
+  console.error(`> resumed: ${Object.keys(state.readFiles).length}/${state.files.length} files read`);
+} else {
   const list = await commits(co.dir, co.baseSha, meta.headSha);
   const chunks: Chunk[] = [];
   for (const c of list) {
@@ -42,17 +47,19 @@ if (!state) {
       chunks.push({ id: `${c.sha.slice(0, 7)}:${f.path}`, sha: c.sha, path: f.path, status: f.status, adds: f.adds, dels: f.dels, verdict: 'none' });
     }
   }
+  const files = await prFiles(co.dir, co.baseSha, meta.headSha);
   const diffFile = await fullDiff(co.dir, co.baseSha, meta.headSha);
   state = {
     url: prUrl, owner: ref.owner, repo: ref.repo, number: ref.number,
     title: meta.title, author: meta.author,
     headSha: meta.headSha, baseSha: co.baseSha, baseRef: meta.baseRef,
-    dir: co.dir, diffFile, commits: list, chunks, doubts: []
+    dir: co.dir, diffFile, commits: list, chunks, files, readFiles: {}, doubts: prev?.doubts ?? [],
+    sessionId: prev?.sessionId, forkedFrom: prev?.forkedFrom, shape: prev?.shape
   };
+  carryOver(state, prev);
   save(state);
-  console.error(`> ${list.length} commits, ${chunks.length} chunks`);
-} else {
-  console.error(`> resumed state: ${state.chunks.filter((c) => c.verdict !== 'none').length}/${state.chunks.length} chunks judged`);
+  const kept = Object.keys(state.readFiles).length;
+  console.error(`> ${list.length} commits, ${chunks.length} chunks, ${files.length} files${prev ? ` (new head; ${kept} read files carried over)` : ''}`);
 }
 
 const commitBySha = new Map<string, Commit>(state.commits.map((c) => [c.sha, c]));
@@ -115,11 +122,18 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (host !== '127.0.0.1' && host !== 'localhost') return json(res, 403, { error: 'local only' });
 
   const url = new URL(req.url || '/', `http://localhost:${port}`);
-  const s = state as PrState;
+  const s = state;
 
   if (req.method === 'GET' && url.pathname === '/api/pr') return json(res, 200, { ...s, busy });
 
+  // one file's diff: within one commit (`chunk`), or PR-wide against the merge-base (`path`)
   if (req.method === 'GET' && url.pathname === '/api/diff') {
+    const path = url.searchParams.get('path');
+    if (path) {
+      const f = s.files.find((x) => x.path === path);
+      if (!f) return json(res, 404, { error: 'unknown file' });
+      return json(res, 200, { file: f, patch: await prFileDiff(s.dir, s.baseSha, s.headSha, f.path, f.oldPath) });
+    }
     const chunk = s.chunks.find((c) => c.id === url.searchParams.get('chunk'));
     if (!chunk) return json(res, 404, { error: 'unknown chunk' });
     const commit = commitBySha.get(chunk.sha);
@@ -127,17 +141,30 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return json(res, 200, { chunk, patch: await fileDiff(s.dir, commit, chunk.path) });
   }
 
+  // full file contents for context expansion: rev is base, head, or a commit sha (+ `parent`)
+  if (req.method === 'GET' && url.pathname === '/api/file') {
+    const path = url.searchParams.get('path') || '';
+    const revParam = url.searchParams.get('rev') || 'head';
+    let rev = revParam === 'base' ? s.baseSha : revParam === 'head' ? s.headSha : revParam;
+    if (url.searchParams.get('parent') === '1') rev = `${rev}^`;
+    if (!path) return json(res, 400, { error: 'path required' });
+    const contents = await fileAt(s.dir, rev, path);
+    return json(res, 200, { path, rev, contents });
+  }
+
+  // verdict on one chunk, every chunk of a commit (`sha`), every chunk of a file (`path`), or many files (`paths`)
   if (req.method === 'POST' && url.pathname === '/api/verdict') {
     const body = await readJson(req);
     if (!VERDICTS.includes(body.verdict as Verdict)) return json(res, 400, { error: 'bad verdict' });
-    // one chunk, or every chunk of a commit when `sha` is given
-    const targets = typeof body.sha === 'string'
-      ? s.chunks.filter((c) => c.sha === body.sha)
-      : s.chunks.filter((c) => c.id === body.chunkId);
-    if (!targets.length) return json(res, 404, { error: 'unknown chunk' });
+    let targets: Chunk[];
+    if (typeof body.sha === 'string') targets = s.chunks.filter((c) => c.sha === body.sha);
+    else if (typeof body.path === 'string') targets = s.chunks.filter((c) => c.path === body.path);
+    else if (Array.isArray(body.paths)) { const set = new Set(body.paths as string[]); targets = s.chunks.filter((c) => set.has(c.path)); }
+    else targets = s.chunks.filter((c) => c.id === body.chunkId);
+    if (!targets.length) return json(res, 404, { error: 'nothing matched' });
     for (const c of targets) c.verdict = body.verdict as Verdict;
     save(s);
-    return json(res, 200, { ok: true, count: targets.length });
+    return json(res, 200, { ok: true, count: targets.length, readFiles: s.readFiles });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/sessions') {
@@ -227,6 +254,6 @@ const server = createServer((req, res) => {
 
 server.listen(port, '127.0.0.1', () => {
   const url = `http://127.0.0.1:${port}`;
-  console.error(`> doubt: ${url}  (${state?.title})`);
+  console.error(`> doubt: ${url}  (${state.title})`);
   if (!noOpen) execFile('open', [url], () => {});
 });

@@ -14,18 +14,27 @@ npm start -- https://github.com/<owner>/<repo>/pull/<n>
 
 Needs `git`, `gh` (logged in), Node 22. The Claude binary ships with the Agent SDK.
 
-The daemon clones the base repo (blob-filtered) under `~/.doubt/work`, fetches the PR head, computes the merge-base, lists commits oldest first, and opens the UI on `http://127.0.0.1:7880`. State lives in `~/.doubt/state/<owner>-<repo>-<n>-<sha7>.json`; a force-push starts a clean queue.
+The daemon clones the base repo (blob-filtered) under `~/.doubt/work`, fetches the PR head, computes the merge-base, lists commits oldest first, and opens the UI on `http://127.0.0.1:7880`. State lives in `~/.doubt/state/<owner>-<repo>-<n>.json` and survives pushes for files whose content did not change.
 
-## Keys
+## Reading
 
-The center shows either one commit with every file it touched stacked (click a commit in the queue, or `c`), or one file (click a file, or `c` again). Keys act on what is shown. Click the page once after it opens so it has keyboard focus.
+The sidebar has two tabs, `s` switches. **Files** is a GitHub-style tree of every file the PR changes against its merge-base, with status, counts, a kind badge (test, docs, cfg, lock, gen, snap) and `ws` when the change is whitespace only. Click a file to read its PR-wide diff; `j`/`k` walk the files in reading order: source first, then tests, then docs and config, then generated files and lockfiles. **Commits** lists commits oldest first; click one to see every file it touched stacked, `c` drops to one file.
+
+Lockfiles, generated files, snapshots and whitespace-only changes are noise: the top bar counts them and `n` marks them all read in one go.
+
+A file is read when every commit's change to it is read, in either tab. Read marks are keyed by the file's content, so after the author pushes again only the files that actually changed come back as unread.
+
+Changed lines highlight the changed words. Collapsed context expands to the full file. Click the page once after it opens so it has keyboard focus.
 
 | key | does |
 |---|---|
-| `u` | read: settle the shown file or the whole commit, show the next unread one |
-| `x` | unmark the shown file or commit |
-| `c` | switch between whole-commit and single-file view |
-| `j` / `k` | move to the next or previous commit or file without judging |
+| `u` | read: settle the shown file or commit, show the next unread one |
+| `x` | unmark it |
+| `n` | mark every noise file read |
+| `j` / `k` | next / previous file (reading order) or commit |
+| `s` | switch between the Files tree and the Commits list |
+| `c` | in Commits: whole commit or one file |
+| `[` / `]` | in a stacked commit: jump between files |
 
 ## Claude session
 
