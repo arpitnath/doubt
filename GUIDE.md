@@ -1,0 +1,122 @@
+# doubt: what it does and how to review with it
+
+A reading tool for pull requests at agent volume. You walk a PR one piece at a time and say, for each piece, whether you understood it. Nothing leaves your machine. This file is a copy of `~/Desktop/refs/doubt-guide.md`; decisions and history live beside it in `doubt-poc.md`.
+
+## 1. Features
+
+**Opening PRs**
+
+- One daemon, started once with `npm start`, opens `http://127.0.0.1:7880`.
+- Paste any GitHub PR URL on the landing page. Every PR you opened before is listed with title, author, read progress and whether it is open now. Click to return to it.
+- PRs stay open side by side. Each review has a stable URL, `#/pr/<owner>-<repo>-<number>`.
+- The daemon clones the base repo once per repo, blob-filtered, under `~/.doubt/work`, fetches the PR head, computes the merge-base, and lists commits oldest first. Merged PRs work too; the base falls back to the commit GitHub compared against.
+- A private repo needs nothing extra beyond `gh auth login`.
+
+**Three ways to cut the PR, in the sidebar**
+
+- **Changes**: a GitHub-style tree of every file the PR touches against its merge-base. Single-child folders collapse into one row, folders fold, each folder shows how many files are still unread. Files carry a status letter, add and delete counts, a kind badge (test, docs, cfg, lock, gen, snap) and `ws` when the change is whitespace only.
+- **Commits**: commits oldest first with their files. Click a commit to see every file it touched stacked in the center, or one file at a time.
+- **Repo**: the whole repository at the PR head, like an editor's explorer, folded except where the changes live. Any file opens read-only for context.
+
+**Reading**
+
+- Split or unified diff, changed words highlighted inside changed lines.
+- Collapsed context expands to the full file. Or show the whole file with the hunks inline, Zed-style.
+- Reading order under `j` and `k`: source first, then tests, then docs and config, then generated files and lockfiles. The tree stays in path order for orientation.
+- Noise detection: lockfiles, generated output, snapshots and whitespace-only changes are counted in the top bar and cleared with one key.
+
+**Verdicts and memory**
+
+- Mark a file or a whole commit read, or unmark it. A file counts as read when every commit's change to it is read, from either tab.
+- Read marks are keyed by the file's content, so after the author pushes again only files whose content actually changed come back as unread. Everything is in `~/.doubt/state/<owner>-<repo>-<number>.json`.
+
+**Finding things**
+
+- Fuzzy open any file in the repo by name.
+- Search the whole repo at the PR head with git grep, as you type, case-insensitive. Enter lands on the line.
+- Outline of the file in focus: functions, classes, arrow functions, interfaces, types, enums, methods, describe and it blocks; Python, Go, Rust, Markdown headings and YAML keys too. Enter jumps.
+- Go to definition and find references for TypeScript and JavaScript through a language service built on first use. Workspace packages in a monorepo resolve by name.
+- The browser's own Cmd+F works inside the diff.
+
+**Taking things out**
+
+- Copy `path:line-line` of the selected lines, or a fenced snippet with three lines of context, for pasting into a terminal, a comment or an agent.
+
+**Not in the tool, on purpose**
+
+- Nothing is posted to GitHub. CI, merge and the formal approval stay there.
+- No Claude in the UI for now. The daemon still has the session and question endpoints from the first version, unused, for when that flow is redesigned.
+
+## 2. How to use it
+
+**Setup, once**
+
+```sh
+cd ~/Desktop/doubt
+npm install
+npm run ui:build
+```
+
+Needs `git`, `gh` logged in, Node 22. Rebuild the UI after pulling changes to `ui/`.
+
+**Every day**
+
+```sh
+npm start            # leave it running
+```
+
+Paste a PR URL, or click one you opened before. First time on a repo takes 20 to 40 seconds, later opens a few. Click the page once so it has keyboard focus. If 7880 is taken, `npm start -- --port 7881`.
+
+**Keys**
+
+| key | does |
+|---|---|
+| `u` | read: settle the shown file or commit, show the next unread one |
+| `x` | unmark it |
+| `n` | mark every noise file read |
+| `j` / `k` | next / previous file in reading order, or next commit |
+| `s` | cycle the sidebar: Changes, Commits, Repo |
+| `c` | in Commits: whole commit or one file |
+| `[` / `]` | in a stacked commit: jump between files |
+| `e` | whole file with inline hunks, or hunks only |
+| `w` | split or unified |
+| `p` | open any file by fuzzy name |
+| `g` | search the repo; Enter lands on the line |
+| `o` | outline of the file in focus; Enter jumps |
+| `y` / `Y` | copy `path:line` for the selected lines, or a fenced snippet with context |
+| `⌘` click | go to definition of a token |
+| `⌘⌥` click | list references of a token |
+| `Esc` | close any palette |
+
+Select lines by clicking a line number and dragging. That selection is what `y`, `Y` and the outline treat as the file in focus; in a stacked commit it also picks which file they mean.
+
+**What the screen shows**
+
+- Top bar: PR, repo, author, base and head, and files read out of total with the noise count.
+- Left: the sidebar tab you chose.
+- Center: one file against the merge-base, one commit stacked, one file of a commit, or a repo file read-only. The header line says which.
+- Palettes open over the center for open, search, outline and references.
+
+## 3. The flow that makes it fast
+
+The tool is built around one rule: approve means understood, not verified. Correctness you can check with tests and tools. Comprehension is the one thing only you can do, and it is the thing that stops slop.
+
+**Pass 1, the shape, two minutes.** Changes tab. Do not read diffs yet. Look at the tree: which packages, which folders, how many files are source versus tests versus config. Press `n` to clear the noise. Open the one or two files with the biggest change in source and skim the header line of each hunk only. You now know what this PR is and where its boundary is. This is where first principles questions get asked: does this need to exist, is there already one of these, is the shape right.
+
+**Pass 2, read in order.** Start on the first unread source file and let `j` carry you. Source first, so you see the behaviour change before the tests that encode it. For each file: read, then `u`. If you do not get it, do not press `u`. Press `e` for the whole file, `⌘`click the thing you do not get, `⌘⌥`click to see who else calls it, `g` to find the string. Then `u`, or leave it unread and `j` on. Unread files are the list of what you still do not understand. That list is the review.
+
+**Pass 3, commits, when the author committed in steps.** Commits tab. Walk commits with `j` and `k`, each one stacked. This is how to read a PR that tells a story, and how to read a sync PR where each commit is an upstream change already reviewed and only the hand fixes and the merge commit need eyes. A merge commit shows only its conflict-resolution lines.
+
+**When a push arrives.** Open the PR again. Files whose content did not change stay read. The unread set is exactly what is new. Read those, done.
+
+**Taking a doubt to the dev or an agent.** Select the lines, `Y`, paste. The snippet carries the path, the line range and the context, so the question needs no setup.
+
+**What to skip without guilt.** Everything `n` clears. Anything in the Repo tab you opened only for context. Tests until the source they test is understood.
+
+**What not to do.** Do not press `u` because the diff looks plausible. Plausible is what agents produce. Press `u` because you could explain the change to the author.
+
+## Pointers
+
+- Decisions, history and what was deliberately not built: `~/Desktop/refs/doubt-poc.md`
+- Code: `~/Desktop/doubt`, daemon in `daemon/`, UI in `ui/src/`, the SDK risk spike in `spike/`
+- State and clones: `~/.doubt/state`, `~/.doubt/work`
