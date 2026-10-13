@@ -67,6 +67,27 @@ kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: 
 .palette .row .dir { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette .row .st { color: var(--accent); width: 12px; }
 .palette .none { padding: 12px 14px; color: var(--muted); }
+.landing { height: 100%; display: flex; justify-content: center; align-items: flex-start; padding: 14vh 16px 0; overflow: auto; }
+.landing .box { width: 720px; max-width: 100%; }
+.landing h1 { font-size: 28px; margin: 0 0 6px; letter-spacing: -0.02em; }
+.landing .sub { color: var(--muted); margin: 0 0 22px; }
+.landing form { display: flex; gap: 8px; }
+.landing input { flex: 1; font: inherit; font-size: 14px; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; outline: none; }
+.landing input:focus { border-color: var(--muted); }
+.landing button { padding: 0 18px; border-radius: 8px; }
+.landing .muted { color: var(--muted); margin: 12px 0 0; }
+.landing .err { color: var(--doubt); margin: 12px 0 0; }
+.landing .recent { margin-top: 36px; }
+.landing .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+.landing .pr { display: grid; grid-template-columns: 56px 1fr auto; grid-template-rows: auto auto; column-gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; cursor: pointer; }
+.landing .pr:hover { border-color: var(--muted); background: var(--panel); }
+.landing .pr.busy { opacity: 0.6; }
+.landing .pr .num { color: var(--accent); font-family: ui-monospace, Menlo, monospace; grid-row: 1 / 3; align-self: center; }
+.landing .pr .title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.landing .pr .meta { grid-column: 2; color: var(--muted); font-size: 12px; }
+.landing .pr .progress { grid-column: 3; grid-row: 1 / 3; align-self: center; color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.top .home { color: var(--muted); text-decoration: none; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.top .home:hover { color: var(--text); }
 .stack { margin: 10px 0 18px; }
 .stack.understood { opacity: 0.45; }
 .msg.take { color: var(--muted); border-left: 2px solid var(--muted); padding-left: 10px; font-style: italic; }

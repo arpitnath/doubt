@@ -2,13 +2,32 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PatchDiff, File as PierreFile, type FileDiffMetadata, type FileDiffLoadedFiles } from '@pierre/diffs/react';
 import { fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, isNoise, readingOrder, setVerdict, type Chunk, type PrFile, type PrState, type VerdictTarget } from './api';
 import { Tree } from './Tree';
+import { Landing } from './Landing';
+
+// hash routing, nothing more: #/ is the landing page, #/pr/<key> is a review
+function useHash(): string {
+  const [hash, setHash] = useState(window.location.hash);
+  useEffect(() => {
+    const on = () => setHash(window.location.hash);
+    window.addEventListener('hashchange', on);
+    return () => window.removeEventListener('hashchange', on);
+  }, []);
+  return hash;
+}
+
+export function App() {
+  const hash = useHash();
+  const m = hash.match(/^#\/pr\/(.+)$/);
+  if (!m) return <Landing onOpen={(key) => { window.location.hash = `#/pr/${key}`; }} />;
+  return <Review key={m[1]} prKey={decodeURIComponent(m[1])} />;
+}
 
 // ponytail: the Claude room is out of the UI for now; the daemon still serves /api/session and /api/doubt.
 type Tab = 'files' | 'commits' | 'repo';
 type View = { kind: 'file'; path: string } | { kind: 'commit'; sha: string } | { kind: 'chunk'; id: string } | { kind: 'repo'; path: string };
 interface Item { key: string; path: string; oldPath?: string; oldRev: string; newRev: string; read: boolean; status: string; adds: number; dels: number }
 
-export function App() {
+function Review({ prKey }: { prKey: string }) {
   const [pr, setPr] = useState<PrState | null>(null);
   const [tree, setTree] = useState<string[]>([]);
   const [tab, setTab] = useState<Tab>('files');
@@ -23,14 +42,14 @@ export function App() {
   const paletteRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    getPr().then((s) => {
+    getPr(prKey).then((s) => {
       setPr(s);
       const order = readingOrder(s.files);
       const first = order.find((f) => s.readFiles[f.path] === undefined && !isNoise(f)) ?? order.find((f) => s.readFiles[f.path] === undefined) ?? order[0];
       if (first) setView({ kind: 'file', path: first.path });
     });
-    getTree().then((t) => setTree(t.paths));
-  }, []);
+    getTree(prKey).then((t) => setTree(t.paths));
+  }, [prKey]);
 
   const ordered = useMemo(() => (pr ? readingOrder(pr.files) : []), [pr]);
   const commitBySha = useMemo(() => new Map(pr?.commits.map((c) => [c.sha, c]) ?? []), [pr]);
@@ -53,19 +72,19 @@ export function App() {
     setPatches({});
     setRepoFile(null);
     if (view?.kind === 'repo') {
-      getFileAt('head', view.path).then((r) => { if (!cancelled) setRepoFile({ path: view.path, contents: r.contents ?? '' }); });
+      getFileAt(prKey, 'head', view.path).then((r) => { if (!cancelled) setRepoFile({ path: view.path, contents: r.contents ?? '' }); });
     } else {
-      const loads = items.map((it) => (it.oldRev === 'base' ? getFileDiff(it.path) : getChunkDiff(it.key)).then((d) => [it.key, d.patch] as const));
+      const loads = items.map((it) => (it.oldRev === 'base' ? getFileDiff(prKey, it.path) : getChunkDiff(prKey, it.key)).then((d) => [it.key, d.patch] as const));
       Promise.all(loads).then((pairs) => { if (!cancelled) setPatches(Object.fromEntries(pairs)); });
     }
     diffRef.current?.scrollTo({ top: 0 });
     return () => { cancelled = true; };
-  }, [items, view]);
+  }, [items, view, prKey]);
 
   // ---- verdicts ----------------------------------------------------------------------------------
   const apply = useCallback(async (target: VerdictTarget, verdict: 'understood' | 'none') => {
     if (!pr) return;
-    const r = await setVerdict(target, verdict);
+    const r = await setVerdict(prKey, target, verdict);
     setPr((p) => {
       if (!p) return p;
       const pick = (c: Chunk) =>
@@ -76,7 +95,7 @@ export function App() {
       return { ...p, chunks: p.chunks.map((c) => (pick(c) ? { ...c, verdict } : c)), readFiles: r.readFiles };
     });
     return r.readFiles;
-  }, [pr]);
+  }, [pr, prKey]);
 
   const nextFile = useCallback((from: string, readFiles: Record<string, string>): string | null => {
     const i = ordered.findIndex((f) => f.path === from);
@@ -215,11 +234,11 @@ export function App() {
     const oldName = meta.prevName || meta.name;
     const parent = it.oldRev.endsWith('^');
     const [oldSide, newSide] = await Promise.all([
-      getFileAt(parent ? it.oldRev.slice(0, -1) : it.oldRev, oldName, parent),
-      getFileAt(it.newRev, meta.name)
+      getFileAt(prKey, parent ? it.oldRev.slice(0, -1) : it.oldRev, oldName, parent),
+      getFileAt(prKey, it.newRev, meta.name)
     ]);
     return { oldFile: { name: oldName, contents: oldSide.contents ?? '' }, newFile: { name: meta.name, contents: newSide.contents ?? '' } };
-  }, []);
+  }, [prKey]);
 
   if (!pr) return <div className="main"><div className="empty">loading…</div></div>;
 
@@ -232,6 +251,7 @@ export function App() {
   return (
     <div className="app two" tabIndex={-1} ref={(el) => { if (el && !el.contains(document.activeElement)) el.focus(); }} style={{ outline: 'none' }}>
       <div className="top">
+        <a className="home" href="#/" title="all pull requests">doubt</a>
         <span className="title">#{pr.number} {pr.title}</span>
         <span className="meta">{pr.owner}/{pr.repo} · {pr.author} · {pr.baseRef} ← {pr.headSha.slice(0, 7)}</span>
         <span className="progress"><b>{readCount}</b> / {pr.files.length} files read{noiseLeft ? <> · {noiseLeft} noise, <kbd>n</kbd> skips</> : null}</span>

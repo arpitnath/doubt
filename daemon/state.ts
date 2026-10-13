@@ -52,7 +52,7 @@ export interface PrState {
 
 export const DOUBT_HOME = join(homedir(), '.doubt');
 export const WORK_ROOT = join(DOUBT_HOME, 'work');
-const STATE_ROOT = join(DOUBT_HOME, 'state');
+export const STATE_ROOT = join(DOUBT_HOME, 'state');
 
 export function stateKey(s: Pick<PrState, 'owner' | 'repo' | 'number'>): string {
   return `${s.owner}-${s.repo}-${s.number}`;

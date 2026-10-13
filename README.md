@@ -9,12 +9,14 @@ Status: PoC. Works end to end on real PRs. Design and decisions: `~/Desktop/refs
 ```sh
 npm install
 npm run ui:build                       # once, and after UI changes
-npm start -- https://github.com/<owner>/<repo>/pull/<n>
+npm start                              # opens http://127.0.0.1:7880, runs until you stop it
 ```
+
+Paste a PR URL on the page. PRs you opened before are listed there with their progress; opening another PR never closes the first. `npm start -- <pr-url>` opens one straight away. Add `-- --port 7881` if 7880 is taken.
 
 Needs `git`, `gh` (logged in), Node 22. The Claude binary ships with the Agent SDK.
 
-The daemon clones the base repo (blob-filtered) under `~/.doubt/work`, fetches the PR head, computes the merge-base, lists commits oldest first, and opens the UI on `http://127.0.0.1:7880`. State lives in `~/.doubt/state/<owner>-<repo>-<n>.json` and survives pushes for files whose content did not change.
+For each PR the daemon clones the base repo (blob-filtered) under `~/.doubt/work`, fetches the PR head, computes the merge-base and lists commits oldest first. State lives in `~/.doubt/state/<owner>-<repo>-<n>.json` and survives pushes for files whose content did not change.
 
 ## Reading
 
