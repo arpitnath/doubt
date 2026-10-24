@@ -14,7 +14,7 @@ export interface PrState {
   url: string; owner: string; repo: string; number: number; title: string; author: string;
   headSha: string; baseSha: string; baseRef: string; dir: string;
   commits: Commit[]; chunks: Chunk[]; files: PrFile[]; readFiles: Record<string, string>; hunkMarks?: Record<string, number[]>;
-  prevHeadSha?: string; changedSince?: string[]; signals?: Record<string, Signal[]>; body?: string; doubts: Doubt[]; busy: boolean;
+  prevHeadSha?: string; changedSince?: string[]; signals?: Record<string, Signal[]>; body?: string; doubts: Doubt[];
 }
 export const resolveDoubt = (key: string, id: string, resolved: boolean): Promise<unknown> =>
   fetch('/api/agent/resolve', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pr: key, id, resolved }) }).then((r) => ok(r));

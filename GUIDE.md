@@ -1,6 +1,6 @@
 # doubt: what it does and how to review with it
 
-A reading tool for pull requests at agent volume. You walk a PR one piece at a time and say, for each piece, whether you understood it. Nothing leaves your machine. This file is a copy of `~/Desktop/refs/doubt-guide.md`; decisions and history live beside it in `doubt-poc.md`.
+A reading tool for pull requests at agent volume. You walk a PR one piece at a time and say, for each piece, whether you understood it. Nothing leaves your machine.
 
 ## 1. Features
 
@@ -68,7 +68,7 @@ A reading tool for pull requests at agent volume. You walk a PR one piece at a t
 **Setup, once**
 
 ```sh
-cd ~/Desktop/doubt
+cd doubt
 npm install
 npm run ui:build
 ```
@@ -142,6 +142,5 @@ The tool is built around one rule: approve means understood, not verified. Corre
 
 ## Pointers
 
-- Decisions, history and what was deliberately not built: `~/Desktop/refs/doubt-poc.md`
-- Code: `~/Desktop/doubt`, daemon in `daemon/`, UI in `ui/src/`, the SDK risk spike in `spike/`
-- State and clones: `~/.doubt/state`, `~/.doubt/work`
+- Code: daemon in `daemon/`, UI in `ui/src/`, the SDK risk spike in `spike/`
+- State, clones and the event log: `~/.doubt/state`, `~/.doubt/work`, `~/.doubt/events.jsonl`

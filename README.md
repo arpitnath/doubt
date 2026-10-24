@@ -2,7 +2,7 @@
 
 A reading tool for PRs at agent volume. Walk a PR one chunk at a time. Each chunk gets one of two verdicts: **understood** (settled, hidden) or **doubt** (a located question routed to a Claude session that already holds the whole PR). Approve means understood, not verified. Claude answers when asked; it never pre-grades.
 
-Status: PoC. Works end to end on real PRs. Design and decisions: `~/Desktop/refs/doubt-poc.md`.
+Status: PoC. Works end to end on real PRs.
 
 ## Run
 
@@ -64,12 +64,14 @@ Select lines by clicking line numbers; that selection is what `y`, `Y` and the o
 
 It is a cloud-shell architecture: a pseudo-terminal on the daemon (`node-pty`), `xterm.js` in the browser, a WebSocket between. Nothing of the CLI is re-implemented. The nested session gets a clean environment so it never thinks it is running inside another Claude Code.
 
-The older SSE question endpoints (`/api/session`, `/api/doubt`) still exist, unused.
+A PR checkout is someone else's code, so a Claude started there loads only your user settings: the PR's own `.claude/settings.json` (hooks, permissions) never configures your reviewer. Sessions resumed in your own projects keep their project settings. The daemon only answers its own page: requests from another site's page are refused.
+
+What you do in the tool (PRs opened, files viewed, verdicts, doubts sent) is appended to `~/.doubt/events.jsonl`, on your machine only, so reading can be measured later.
 
 ## Layout
 
 ```
-daemon/   git.ts github.ts state.ts agent.ts server.ts   (Node, tsx)
+daemon/   server.ts git.ts github.ts state.ts term.ts transcript.ts signals.ts lang.ts   (Node, tsx)
 ui/       Vite + React + @pierre/diffs
 spike/    the first-hour risk check, kept as a record
 ```
