@@ -3,6 +3,9 @@
 // re-implemented; the CLI is the CLI.
 import * as pty from 'node-pty';
 import type { WebSocket } from 'ws';
+import { accessSync, chmodSync, constants, existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 import { WORK_ROOT } from './state.js';
 
 export interface TermInfo { id: string; sessionId?: string; cwd: string; title: string; startedAt: number; alive: boolean }
@@ -54,7 +57,23 @@ function claudeArgs(opts: { sessionId?: string; cwd: string }): string[] {
   return args;
 }
 
+// node-pty's prebuilt spawn-helper comes out of npm without its exec bit, and every terminal fails to
+// start without it. Found wherever npm put node-pty (npx hoists it), fixed once.
+let helperChecked = false;
+function ensureSpawnHelper(): void {
+  if (helperChecked) return;
+  helperChecked = true;
+  try {
+    const helper = join(dirname(createRequire(import.meta.url).resolve('node-pty/package.json')), 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper');
+    if (!existsSync(helper)) return; // Windows, or built from source
+    try { accessSync(helper, constants.X_OK); } catch { chmodSync(helper, 0o755); }
+  } catch (err) {
+    console.error(`> could not make node-pty's spawn-helper executable: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
 export function openTerm(opts: { sessionId?: string; cwd: string; title: string }): TermInfo {
+  ensureSpawnHelper();
   const id = Math.random().toString(36).slice(2, 10);
   // a login shell so `claude` resolves the way it does in the user's own terminal;
   // arguments go in as "$@", so nothing from the request is ever parsed by the shell

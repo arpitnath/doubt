@@ -7,14 +7,23 @@ Status: PoC. Works end to end on real PRs.
 ## Run
 
 ```sh
-npm install
-npm run ui:build                       # once, and after UI changes
-npm start                              # opens http://127.0.0.1:7880, runs until you stop it
+npx @arpitnath/doubt                   # opens http://127.0.0.1:7880, runs until you stop it
 ```
 
-Paste a PR URL on the page. PRs you opened before are listed there with their progress; opening another PR never closes the first. `npm start -- <pr-url>` opens one straight away. Add `-- --port 7881` if 7880 is taken.
+Paste a PR URL on the page. PRs you opened before are listed there with their progress; opening another PR never closes the first. `npx @arpitnath/doubt <pr-url>` opens one straight away. Add `--port 7881` if 7880 is taken, `--no-open` to skip opening the browser.
 
-Needs `git`, `gh` (logged in), Node 22. The Claude binary ships with the Agent SDK.
+Needs Node 22 or newer, `git`, and the GitHub CLI logged in (`gh auth login`); doubt says so in one line at startup if one is missing. The agent panel also needs Claude Code on your PATH. On Linux, npm builds the terminal library (`node-pty`) from source during install, which needs a C++ toolchain; macOS and Windows get prebuilt binaries.
+
+**From source**, to work on doubt itself:
+
+```sh
+npm install
+npm run ui:build                       # once, and after UI changes
+npm start                              # tsx, no compile step
+npm run check                          # the language service check
+```
+
+`npm run build` compiles the daemon to `dist/` and builds the UI; `npm pack` runs it.
 
 For each PR the daemon clones the base repo (blob-filtered) under `~/.doubt/work`, fetches the PR head, computes the merge-base and lists commits oldest first. State lives in `~/.doubt/state/<owner>-<repo>-<n>.json` and survives pushes for files whose content did not change.
 
