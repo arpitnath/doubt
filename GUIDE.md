@@ -126,5 +126,6 @@ The tool is built around one rule: approve means understood, not verified. Corre
 
 ## Pointers
 
+- How it works inside: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Code: daemon in `daemon/`, UI in `ui/src/`, the SDK risk spike in `spike/`
 - State, clones and the event log: `~/.doubt/state`, `~/.doubt/work`, `~/.doubt/events.jsonl`

@@ -67,6 +67,8 @@ What you do in the tool (PRs opened, files viewed, verdicts, doubts sent) is app
 
 ## Layout
 
+How it works, for agents and contributors: [ARCHITECTURE.md](ARCHITECTURE.md). What was built when: [PLAN.md](PLAN.md).
+
 ```
 daemon/   server.ts git.ts github.ts state.ts term.ts transcript.ts signals.ts lang.ts   (Node, tsx)
 ui/       Vite + React + @pierre/diffs: App, Tree, Palette, Agent, HoverCard
