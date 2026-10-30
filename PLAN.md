@@ -22,7 +22,7 @@ Click the page once after it opens so it has keyboard focus.
 
 ## Demo A: safe and correct (do first)
 
-### 0. Safety (branch `p0-safety`, built)
+### 0. Safety ([PR #2](https://github.com/arpitnath/doubt/pull/2))
 - **What changes:** a PR checkout can't configure your Claude; other websites can't drive the daemon; no git or gh call can hang it; opens, views, verdicts and doubts go to `~/.doubt/events.jsonl`.
 - **Try it:**
   1. Open PR 1829, press `a`, start a **new** session.
@@ -32,7 +32,7 @@ Click the page once after it opens so it has keyboard focus.
 - **Today:** the session loads the PR's own `.claude/settings.json`; no event log exists.
 - [x] built · [ ] verified
 
-### 3.1 References and definitions through the project's aliases
+### 3.1 References and definitions through the project's aliases ([PR #3](https://github.com/arpitnath/doubt/pull/3))
 - **What changes:** the language engine reads each package's `jsconfig.json`/`tsconfig.json` instead of made-up settings.
 - **Try it:**
   1. Open `packages/bruno-app/src/hooks/useDebounce/index.js`.
@@ -40,7 +40,7 @@ Click the page once after it opens so it has keyboard focus.
   3. Open `packages/bruno-app/src/components/AppWebviewPane/index.js`, `⌘`-click `EmptyAppState` on line 2.
 - **You should see:** references in **8 files**, including `Sidebar/Collections/index.js`. `EmptyAppState` opens `components/EmptyAppState/index.js` at line 8.
 - **Today:** references in **2 files** (the hook and its test). `EmptyAppState` stops at the import line.
-- [ ] built · [ ] verified
+- [x] built · [ ] verified
 
 ---
 
