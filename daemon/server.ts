@@ -1,10 +1,12 @@
-// doubt daemon. Usage: tsx daemon/server.ts [github-pr-url] [--port 7880] [--no-open]
+#!/usr/bin/env node
+// doubt daemon. Usage: doubt [github-pr-url] [--port 7880] [--no-open]
 // Runs once. PRs are opened from the page (POST /api/open) and kept side by side; every route
 // takes `pr=<key>`. Serves the UI from ui/dist, state, diffs, file contents, and the agent terminals.
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { git, authEnv, parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, prFiles, prFileDiff, fileAt, lsTree, grep, history, type Commit } from './git.js';
 import { Lang } from './lang.js';
@@ -23,7 +25,8 @@ const port = Number(args[args.indexOf('--port') + 1]) || 7880;
 const noOpen = args.includes('--no-open');
 
 const here = dirname(fileURLToPath(import.meta.url));
-const uiDist = join(here, '..', 'ui', 'dist');
+// the built UI sits at <root>/ui/dist: one level up from daemon/ when run from source, two from dist/daemon/ when installed
+const uiDist = [join(here, '..', 'ui', 'dist'), join(here, '..', '..', 'ui', 'dist')].find((d) => existsSync(d)) ?? join(here, '..', 'ui', 'dist');
 
 // ---- open PRs -----------------------------------------------------------------------------------
 
@@ -136,6 +139,24 @@ async function baseTexts(s: PrState): Promise<Map<string, string>> {
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// What doubt needs on the machine, said in one line each instead of a stack trace later. git and a
+// logged-in gh are required; claude only powers the agent panel, so its absence is a warning.
+async function preflight(): Promise<void> {
+  const run = promisify(execFile);
+  const problems: string[] = [];
+  if (Number(process.versions.node.split('.')[0]) < 22) problems.push(`doubt needs Node 22 or newer; this is ${process.versions.node}.`);
+  try { await run('git', ['--version'], { timeout: 10_000 }); } catch { problems.push('doubt needs git: https://git-scm.com/downloads'); }
+  try { await run('gh', ['auth', 'token'], { timeout: 15_000 }); } catch (err) { // the same call the daemon makes for its token
+    problems.push((err as { code?: string }).code === 'ENOENT'
+      ? 'doubt needs the GitHub CLI: https://cli.github.com (brew install gh), then gh auth login'
+      : 'the GitHub CLI is not logged in: run gh auth login');
+  }
+  if (problems.length) { for (const p of problems) console.error(`> ${p}`); process.exit(1); }
+  // the agent panel starts claude through a login shell, so look for it the same way
+  try { await run(process.env.SHELL || '/bin/zsh', ['-lc', 'command -v claude'], { timeout: 15_000 }); }
+  catch { console.error('> Claude Code was not found: reviewing works, the agent panel needs it (https://claude.com/claude-code)'); }
+}
 
 // everything we have ever opened: in memory first, then state files on disk
 function knownPrs(): Array<{ key: string; url: string; owner: string; repo: string; number: number; title: string; author: string; read: number; files: number; open: boolean; updated: number }> {
@@ -425,6 +446,7 @@ server.on('upgrade', (req, socket, head) => {
 });
 for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, () => { closeAll(); process.exit(0); });
 
+await preflight();
 server.listen(port, '127.0.0.1', async () => {
   const base = `http://127.0.0.1:${port}`;
   let target = base;
