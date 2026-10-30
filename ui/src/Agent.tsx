@@ -1,40 +1,55 @@
-// The agent sidebar: your Claude Code sessions, and the ones running here as real terminals.
+// The agent panel: your Claude Code sessions as real terminals, and an Updates tray of every doubt
+// and where its answer stands. It stays mounted while hidden, so terminals keep running and a doubt
+// can always be delivered.
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { termColors, type Theme } from './theme';
-import { agentSessions, agentTerms, closeAgentTerm, openAgentTerm, type AgentSession, type TermInfo } from './api';
+import { agentSessions, agentTerms, closeAgentTerm, openAgentTerm, type AgentSession, type Doubt, type TermInfo } from './api';
+
+// where a doubt goes: a terminal already open here, a session on disk to resume, or a new one in the PR checkout
+export type SendTarget = { kind: 'term'; id: string } | { kind: 'session'; sessionId: string; cwd: string; title: string } | { kind: 'new' };
+export interface Comment { path: string; lines?: { start: number; end: number }; question: string; snippet?: string }
 
 export interface AgentHandle {
-  /** a review comment delivered to the active terminal and recorded as a doubt; false when no terminal is active */
-  send(pr: string, comment: { path: string; lines?: { start: number; end: number }; question: string; snippet?: string }): Promise<boolean>;
-  activeTitle(): string | null;
+  /** opens or resumes the target if needed, shows it, and hands it the doubt; the terminal id, or null when it failed */
+  deliver(target: SendTarget, pr: string, comment: Comment): Promise<string | null>;
+  terms(): TermInfo[];
 }
 
-interface Props { theme: Theme; workdir: string; workdirLabel: string; onClose: () => void }
+interface Props {
+  open: boolean;
+  theme: Theme;
+  workdir: string;
+  workdirLabel: string;
+  doubts: Doubt[];
+  seen: Set<string>;
+  onPickDoubt: (d: Doubt) => void;
+  onClose: () => void;
+}
 
-export const Agent = forwardRef<AgentHandle, Props>(function Agent({ theme, workdir, workdirLabel, onClose }, ref) {
+export const Agent = forwardRef<AgentHandle, Props>(function Agent({ open, theme, workdir, workdirLabel, doubts, seen, onPickDoubt, onClose }, ref) {
   const [sessions, setSessions] = useState<AgentSession[] | null>(null);
   const [terms, setTerms] = useState<TermInfo[]>([]);
+  const termsRef = useRef<TermInfo[]>([]);
+  termsRef.current = terms;
   const [active, setActive] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
   const [showList, setShowList] = useState(true);
-
-  const refresh = useCallback(() => {
-    agentTerms().then((r) => { setTerms(r.terms); setActive((a) => a && r.terms.some((t) => t.id === a) ? a : r.terms[r.terms.length - 1]?.id ?? null); });
-  }, []);
+  const [trayOpen, setTrayOpen] = useState(true);
 
   useEffect(() => {
-    agentSessions().then((r) => setSessions(r.sessions)).catch(() => setSessions([]));
-    refresh();
-  }, [refresh]);
+    agentTerms().then((r) => { setTerms(r.terms); setActive((a) => (a && r.terms.some((t) => t.id === a) ? a : r.terms[r.terms.length - 1]?.id ?? null)); if (r.terms.length) setShowList(false); });
+  }, []);
+  useEffect(() => { if (open && sessions === null) agentSessions().then((r) => setSessions(r.sessions)).catch(() => setSessions([])); }, [open, sessions]);
 
-  const open = useCallback(async (sessionId: string | undefined, cwd: string, title: string) => {
+  const openTerm = useCallback(async (sessionId: string | undefined, cwd: string, title: string) => {
     const r = await openAgentTerm({ sessionId, cwd, title });
     setTerms((t) => [...t, r.term]);
     setActive(r.term.id);
     setShowList(false);
+    return r.term;
   }, []);
 
   const close = useCallback(async (id: string) => {
@@ -44,40 +59,75 @@ export const Agent = forwardRef<AgentHandle, Props>(function Agent({ theme, work
   }, []);
 
   useImperativeHandle(ref, () => ({
-    async send(pr, comment) {
-      if (!active) return false;
-      const r = await fetch(`/api/agent/write`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: active, pr, comment }) });
-      return r.ok;
+    async deliver(target, pr, comment) {
+      let id: string;
+      if (target.kind === 'term') id = target.id;
+      else {
+        const running = target.kind === 'session' ? termsRef.current.find((t) => t.alive && t.sessionId === target.sessionId) : undefined;
+        id = running ? running.id
+          : (await (target.kind === 'new' ? openTerm(undefined, workdir, `new · ${workdirLabel}`) : openTerm(target.sessionId, target.cwd, target.title))).id;
+      }
+      setActive(id);
+      setShowList(false);
+      const r = await fetch('/api/agent/write', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, pr, comment }) });
+      return r.ok ? id : null;
     },
-    activeTitle() { return terms.find((t) => t.id === active)?.title ?? null; }
-  }), [active, terms]);
+    terms: () => termsRef.current
+  }), [openTerm, workdir, workdirLabel]);
 
   const visible = (sessions ?? []).filter((s) => !filter || `${s.cwd} ${s.summary} ${s.gitBranch ?? ''}`.toLowerCase().includes(filter.toLowerCase()));
+  const tray = doubts.filter((d) => d.path).slice().reverse();
+  const unseen = tray.filter((d) => d.answer && !seen.has(d.id)).length;
 
   return (
-    <div className="agent">
+    <div className="agent" style={{ display: open ? 'flex' : 'none' }}>
       <div className="agent-head">
-        <b>Claude</b>
+        <b>Agent</b>
         <div className="agent-tabs">
           {terms.map((t) => (
-            <span key={t.id} className={`agent-tab ${t.id === active ? 'on' : ''} ${t.alive ? '' : 'dead'}`} onClick={() => { setActive(t.id); setShowList(false); }} title={t.cwd}>
+            <span key={t.id} className={`agent-tab ${t.id === active && !showList ? 'on' : ''} ${t.alive ? '' : 'dead'}`} onClick={() => { setActive(t.id); setShowList(false); }} title={t.cwd}>
               {t.title}
               <i onClick={(e) => { e.stopPropagation(); void close(t.id); }} title="close">×</i>
             </span>
           ))}
-          <span className={`agent-tab ${showList ? 'on' : ''}`} onClick={() => setShowList(true)}>+</span>
+          <span className={`agent-tab ${showList ? 'on' : ''}`} onClick={() => setShowList(true)} title="open a session">+</span>
         </div>
-        <button className="agent-close" onClick={onClose} title="hide (a)">⇥</button>
+        <button className="agent-close" onClick={onClose} title="hide the panel; sessions keep running">⇥</button>
       </div>
+
+      {tray.length > 0 && (
+        <div className="tray">
+          <button className="tray-head" onClick={() => setTrayOpen((v) => !v)} aria-expanded={trayOpen}>
+            <span>Updates</span>{unseen > 0 && <span className="badge">{unseen} new</span>}<span className="arrow">{trayOpen ? '▾' : '▸'}</span>
+          </button>
+          {trayOpen && (
+            <div className="tray-list">
+              {tray.map((d) => {
+                const isNew = !!(d.answer && !seen.has(d.id));
+                return (
+                  <button key={d.id} className={`tray-item ${isNew ? 'new' : ''}`} onClick={() => onPickDoubt(d)} title="open the file at this line">
+                    <span className="dot" />
+                    <span className="body">
+                      <span className="where">{shortPath(d.path!)}{d.lines ? `:${d.lines.start}${d.lines.end !== d.lines.start ? `-${d.lines.end}` : ''}` : ''}</span>
+                      <span className="q">{d.question}</span>
+                      <span className={`st ${d.resolved ? '' : d.answer ? 'ok' : ''}`}>{d.resolved ? 'resolved' : d.answer ? (d.done ? 'answered' : 'answering…') : d.done ? 'no answer recorded' : 'waiting…'}{d.title ? ` · ${d.title}` : ''}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {showList || !active ? (
         <div className="agent-list">
           <div className="agent-new">
-            <button onClick={() => void open(undefined, workdir, `new · ${workdirLabel}`)}>new session in the PR checkout</button>
+            <button onClick={() => void openTerm(undefined, workdir, `new · ${workdirLabel}`)}>new session in the PR checkout</button>
           </div>
           <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="filter sessions by path, branch or summary…" />
           {sessions === null ? <div className="muted">loading sessions…</div> : visible.length === 0 ? <div className="muted">no sessions</div> : visible.map((s) => (
-            <div key={s.sessionId} className="agent-session" onClick={() => void open(s.sessionId, s.cwd || workdir, s.summary.slice(0, 28) || s.sessionId.slice(0, 8))} title={s.sessionId}>
+            <div key={s.sessionId} className="agent-session" onClick={() => void openTerm(s.sessionId, s.cwd || workdir, s.summary.slice(0, 28) || s.sessionId.slice(0, 8))} title={s.sessionId}>
               <div className="sum">{s.summary || '(no summary)'}</div>
               <div className="meta">{shortCwd(s.cwd)}{s.gitBranch ? ` · ${s.gitBranch}` : ''} · {ago(s.lastModified)} · {Math.round((s.fileSize || 0) / 1024)} KB</div>
             </div>
@@ -87,7 +137,7 @@ export const Agent = forwardRef<AgentHandle, Props>(function Agent({ theme, work
 
       {terms.map((t) => (
         <div key={t.id} className="agent-term" style={{ display: t.id === active && !showList ? 'block' : 'none' }}>
-          <Xterm id={t.id} visible={t.id === active && !showList} theme={theme} />
+          <Xterm id={t.id} visible={open && t.id === active && !showList} theme={theme} />
         </div>
       ))}
     </div>
@@ -106,7 +156,7 @@ function Xterm({ id, visible, theme }: { id: string; visible: boolean; theme: Th
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host.current);
-    fit.fit();
+    try { fit.fit(); } catch { /* hidden on first paint */ }
     termRef.current = term;
     fitRef.current = fit;
 
@@ -131,6 +181,10 @@ function Xterm({ id, visible, theme }: { id: string; visible: boolean; theme: Th
   }, [visible]);
 
   return <div className="xterm-host" ref={host} />;
+}
+
+function shortPath(p: string): string {
+  return p.split('/').slice(-2).join('/');
 }
 
 function shortCwd(cwd?: string): string {

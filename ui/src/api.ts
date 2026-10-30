@@ -8,7 +8,7 @@ export interface PrFile { path: string; oldPath?: string; status: string; adds: 
 export interface Signal { kind: 'rewritten' | 'tests' | 'deps' | 'todo' | 'dup' | 'sensitive' | 'owners'; note: string }
 export interface Doubt {
   id: string; chunkId: string; path?: string; lines?: { start: number; end: number }; question: string; answer: string; at: number;
-  sessionId?: string; done?: boolean; resolved?: boolean;
+  sessionId?: string; done?: boolean; resolved?: boolean; title?: string;
 }
 export interface PrState {
   url: string; owner: string; repo: string; number: number; title: string; author: string;
@@ -110,9 +110,10 @@ export function parseHunks(patch: string): Hunk[] {
 }
 
 // agent sidebar: sessions on disk, terminals running here
-export interface AgentSession { sessionId: string; cwd?: string; gitBranch?: string; summary: string; lastModified: number; fileSize?: number }
+// group: where the session runs relative to the PR asked about; missing: its folder is gone
+export interface AgentSession { sessionId: string; cwd?: string; gitBranch?: string; summary: string; lastModified: number; fileSize?: number; group?: 'this-pr' | 'other-pr' | 'clone' | 'other'; missing?: boolean }
 export interface TermInfo { id: string; sessionId?: string; cwd: string; title: string; startedAt: number; alive: boolean }
-export const agentSessions = (): Promise<{ sessions: AgentSession[] }> => fetch('/api/agent/sessions').then((r) => ok(r));
+export const agentSessions = (pr?: string): Promise<{ sessions: AgentSession[] }> => fetch(`/api/agent/sessions${pr ? q(pr) : ''}`).then((r) => ok(r));
 export const agentTerms = (): Promise<{ terms: TermInfo[] }> => fetch('/api/agent/terms').then((r) => ok(r));
 export const openAgentTerm = (body: { sessionId?: string; cwd: string; title: string }): Promise<{ term: TermInfo }> =>
   fetch('/api/agent/open', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => ok(r));

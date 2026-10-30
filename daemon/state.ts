@@ -32,6 +32,7 @@ export interface Doubt {
   sessionId?: string;
   marker?: string;
   termStartedAt?: number;
+  title?: string; // the session the doubt went to, as its tab is named
   done?: boolean;
   resolved?: boolean;
 }

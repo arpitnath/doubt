@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PatchDiff, File as PierreFile, type DiffLineAnnotation, type FileDiffMetadata, type FileDiffLoadedFiles, type SelectedLineRange } from '@pierre/diffs/react';
-import { definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, resolveDoubt, syncPr, isNoise, outline, parseHunks, readingOrder, references, search, setVerdict, type Chunk, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
+import { agentSessions, definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, resolveDoubt, syncPr, isNoise, outline, parseHunks, readingOrder, references, search, setVerdict, type AgentSession, type Chunk, type Doubt, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
 import { Tree } from './Tree';
 import { Landing } from './Landing';
-import { Agent, type AgentHandle } from './Agent';
+import { Agent, type AgentHandle, type SendTarget } from './Agent';
 import { marked } from 'marked';
 import { THEMES, applyTheme, readTheme, type Theme } from './theme';
 import { Palette, type PaletteMode, type PaletteState, type Row } from './Palette';
@@ -51,6 +51,9 @@ function Review({ prKey }: { prKey: string }) {
   const [uiTheme, setUiTheme] = useState<Theme>(readTheme);
   useEffect(() => applyTheme(uiTheme), [uiTheme]);
   const [openAnswers, setOpenAnswers] = useState<Set<string>>(new Set()); // doubt ids whose inline answer is expanded
+  const [sendTo, setSendTo] = useState('new'); // 'term:<id>' | 'session:<id>' | 'new'
+  const [sendSessions, setSendSessions] = useState<AgentSession[]>([]);
+  const [seen, setSeen] = useState<Set<string> | null>(null); // answers already looked at; null until loaded
   const [picked, setPicked] = useState<{ key: string; path: string; line: number; col: number; text: string } | null>(null); // the name last clicked in the code
   const changedSet = useMemo(() => new Set(pr?.changedSince ?? []), [pr?.changedSince]);
   const agentRef = useRef<AgentHandle>(null);
@@ -413,17 +416,61 @@ function Review({ prKey }: { prKey: string }) {
   }, [focus, sel]);
 
   const sendComment = useCallback(async () => {
-    if (!pr || !commentTarget || !comment?.trim()) return;
-    if (!agentRef.current?.activeTitle()) { setToast('open a session first (a)'); return; }
+    if (!pr || !commentTarget || !comment?.trim() || !agentRef.current) return;
     const { path, rev, range } = commentTarget;
     const body = await textOf(rev, path);
     const snippet = range ? body.split('\n').slice(range.start - 1, range.end).join('\n') : undefined;
-    const ok = await agentRef.current.send(prKey, { path, lines: range ?? undefined, question: comment.trim(), snippet });
-    setToast(ok ? `sent to ${agentRef.current.activeTitle()}` : 'no active terminal');
+    const target = toTarget(sendTo, sendSessions);
+    if (!target) { setToast('that session is no longer there: pick another'); return; }
+    setAgentOpen(true);
+    const termId = await agentRef.current.deliver(target, prKey, { path, lines: range ?? undefined, question: comment.trim(), snippet });
+    if (!termId) { setToast('could not reach that session'); return; }
+    const next = target.kind === 'new' ? `term:${termId}` : sendTo; // a new session is the default from now on
+    setSendTo(next);
+    try { localStorage.setItem(`doubt.sendto.${prKey}`, next); } catch { /* storage blocked: default next time */ }
+    setToast(target.kind === 'new' ? 'starting a session in the PR checkout; the doubt goes in once it is ready' : 'sent');
     setComment(null);
     const fresh = await getPr(prKey);
     setPr((p) => (p ? { ...p, doubts: fresh.doubts } : p));
-  }, [pr, prKey, commentTarget, comment, textOf]);
+  }, [pr, prKey, commentTarget, comment, textOf, sendTo, sendSessions]);
+
+  // Ask a doubt: the sessions to choose from, grouped by what they see, and last time's choice if it still exists
+  const startDoubt = useCallback(async () => {
+    setComment('');
+    setTimeout(() => commentRef.current?.focus(), 0);
+    const { sessions } = await agentSessions(prKey).catch(() => ({ sessions: [] as AgentSession[] }));
+    const mine = sessions.filter((x) => x.group && x.group !== 'other');
+    setSendSessions(mine);
+    const terms = agentRef.current?.terms().filter((t) => t.alive) ?? [];
+    let remembered: string | null = null;
+    try { remembered = localStorage.getItem(`doubt.sendto.${prKey}`); } catch { /* storage blocked */ }
+    const exists = (v: string | null) => !!v && (v === 'new' || (v.startsWith('term:') && terms.some((t) => `term:${t.id}` === v)) || (v.startsWith('session:') && mine.some((x) => `session:${x.sessionId}` === v && !x.missing)));
+    const newestHere = mine.find((x) => x.group === 'this-pr' && !x.missing);
+    setSendTo(exists(remembered) ? remembered! : newestHere ? `session:${newestHere.sessionId}` : 'new');
+  }, [prKey]);
+
+  // answers seen: loaded per PR; the first time, every answer already there counts as seen
+  useEffect(() => {
+    if (!pr || seen) return;
+    let ids: string[] | null = null;
+    try { ids = JSON.parse(localStorage.getItem(`doubt.seen.${prKey}`) ?? 'null'); } catch { /* storage blocked */ }
+    setSeen(new Set(ids ?? pr.doubts.filter((d) => d.answer).map((d) => d.id)));
+  }, [pr, seen, prKey]);
+  useEffect(() => { if (seen) try { localStorage.setItem(`doubt.seen.${prKey}`, JSON.stringify([...seen])); } catch { /* storage blocked */ } }, [seen, prKey]);
+  // an answer that lands on the file being read counts as seen; elsewhere it waits in the tray
+  const shownPaths = items.map((i) => i.path).join('|');
+  useEffect(() => {
+    if (!pr || !seen) return;
+    const fresh = pr.doubts.filter((d) => d.answer && !seen.has(d.id) && d.path && shownPaths.split('|').includes(d.path));
+    if (fresh.length) setSeen((s) => new Set([...(s ?? []), ...fresh.map((d) => d.id)]));
+  }, [pr, seen, shownPaths]);
+  const unseen = (pr?.doubts ?? []).filter((d) => d.path && d.answer && seen && !seen.has(d.id)).length;
+
+  const pickDoubt = useCallback((d: Doubt) => {
+    if (d.path) openPath(d.path, d.lines?.start);
+    setOpenAnswers((s) => new Set(s).add(d.id));
+    setSeen((s) => new Set([...(s ?? []), d.id]));
+  }, [openPath]);
 
   // the line bar: what can be done with the selected lines, said in words; the doubt box opens in its place
   function lineBar() {
@@ -436,10 +483,11 @@ function Review({ prKey }: { prKey: string }) {
           <label>Your doubt on <code>{where}</code>. The file, lines and code go with it.
             <textarea ref={commentRef} autoFocus rows={3} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="What don't you get about these lines?" />
           </label>
+          <SendTo value={sendTo} onChange={setSendTo} sessions={sendSessions} terms={agentRef.current?.terms().filter((t) => t.alive) ?? []} />
           <div className="row">
-            <span className="to">to <b>{agentRef.current?.activeTitle() ?? 'no session open: open the Agent panel first'}</b> · <kbd>⌘</kbd><kbd>enter</kbd> sends</span>
+            <span className="to"><kbd>⌘</kbd><kbd>enter</kbd> sends · <kbd>esc</kbd> cancels</span>
             <button onClick={() => setComment(null)}>Cancel</button>
-            <button className="primary" onClick={() => void sendComment()}>Send</button>
+            <button className="primary" onClick={() => void sendComment()}>{sendTo === 'new' ? 'Start session and send' : 'Send'}</button>
           </div>
         </div>
       );
@@ -447,7 +495,7 @@ function Review({ prKey }: { prKey: string }) {
     const name = picked && picked.key === sel?.key && picked.line >= range.start && picked.line <= range.end ? picked : null;
     return (
       <div className="linebar" onClick={(e) => e.stopPropagation()}>
-        <button className="primary" onClick={() => { setComment(''); setTimeout(() => commentRef.current?.focus(), 0); }}>Ask a doubt</button>
+        <button className="primary" onClick={() => void startDoubt()}>Ask a doubt</button>
         {name
           ? <>
             <button onClick={() => lookup(name.path, name.line, name.col, false)} title="⌘-click a name does this too">Go to definition of <code>{name.text}</code></button>
@@ -611,7 +659,7 @@ function Review({ prKey }: { prKey: string }) {
         <button onClick={() => void sync()} title="refetch the PR head; files you read stay read unless their content changed">
           Sync{changedSet.size ? <span className="badge" title={`changed since ${pr.prevHeadSha?.slice(0, 7)}`}>{changedSet.size} changed</span> : null}
         </button>
-        <button className={agentOpen ? 'on' : ''} onClick={() => setAgentOpen((v) => !v)} title="your Claude Code sessions, as terminals">Agent</button>
+        <button className={agentOpen ? 'on' : ''} onClick={() => setAgentOpen((v) => !v)} title="your Claude Code sessions, as terminals, and the answers to your doubts">Agent{unseen ? <span className="badge">{unseen} new</span> : null}</button>
         <button className="cmdk" onClick={() => void openPalette('all')} title="open a file, search the repo, run any action">Open, search, actions… <kbd>⌘K</kbd></button>
         <button className="theme" onClick={() => setUiTheme((t) => THEMES[(THEMES.indexOf(t) + 1) % THEMES.length])} title="switch theme: dark, dim, light">Theme: {uiTheme}</button>
       </div>
@@ -741,9 +789,55 @@ function Review({ prKey }: { prKey: string }) {
         <Palette palette={palette} rows={paletteRows} index={paletteIdx} fileCount={tree.length} onIndex={setPaletteIdx} onClose={() => setPalette(null)} onPick={pickRow}
           onQuery={(v) => { setPalette((p) => (p ? { ...p, query: v } : p)); setPaletteIdx(0); }} />
       )}
-      {agentOpen && <Agent ref={agentRef} theme={uiTheme} workdir={pr.dir} workdirLabel={`${pr.repo}#${pr.number}`} onClose={() => setAgentOpen(false)} />}
+      <Agent ref={agentRef} open={agentOpen} theme={uiTheme} workdir={pr.dir} workdirLabel={`${pr.repo}#${pr.number}`} doubts={pr.doubts} seen={seen ?? new Set()} onPickDoubt={pickDoubt} onClose={() => setAgentOpen(false)} />
 
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
+}
+
+const GROUPS: Array<{ group: NonNullable<AgentSession['group']>; label: string }> = [
+  { group: 'this-pr', label: 'This PR' },
+  { group: 'other-pr', label: 'Other PRs in this repo' },
+  { group: 'clone', label: 'Your clone of this repo' }
+];
+
+// What each kind of session will see when it reads files, said before the doubt is sent
+const NOTES: Record<string, string> = {
+  term: 'Open in doubt now.',
+  'this-pr': "Runs in this PR's checkout, and keeps what it learned from earlier questions.",
+  'other-pr': "Runs in another PR's checkout: the files it reads will not match this diff.",
+  clone: 'Runs in your own clone: it reads that branch, not this PR, unless told to.',
+  new: "A fresh session in this PR's checkout. It knows nothing yet and reads what it needs."
+};
+
+function SendTo({ value, onChange, sessions, terms }: { value: string; onChange: (v: string) => void; sessions: AgentSession[]; terms: Array<{ id: string; title: string; sessionId?: string }> }) {
+  const open = new Set(terms.map((t) => t.sessionId).filter(Boolean));
+  const chosen = sessions.find((x) => `session:${x.sessionId}` === value);
+  const big = chosen && (chosen.fileSize ?? 0) > 5e6 ? ` ${Math.round((chosen.fileSize ?? 0) / 1e6)} MB of history makes every answer slower and costlier.` : '';
+  const note = value === 'new' ? NOTES.new : value.startsWith('term:') ? NOTES.term : chosen ? (NOTES[chosen.group ?? ''] ?? '') + (chosen.group === 'clone' && chosen.gitBranch ? ` (branch ${chosen.gitBranch})` : '') + big : '';
+  const warn = !!chosen && (chosen.group === 'other-pr' || chosen.group === 'clone' || !!big);
+  const label = (x: AgentSession) => `${(x.summary || '(no summary)').slice(0, 60)} · ${new Date(x.lastModified).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}${x.missing ? ' · folder gone' : ''}`;
+  return (
+    <div className="sendto">
+      <label>Send to
+        <select value={value} onChange={(e) => onChange(e.target.value)}>
+          {terms.length > 0 && <optgroup label="Open in doubt">{terms.map((t) => <option key={t.id} value={`term:${t.id}`}>{t.title}</option>)}</optgroup>}
+          {GROUPS.map((g) => {
+            const list = sessions.filter((x) => x.group === g.group && !open.has(x.sessionId));
+            return list.length ? <optgroup key={g.group} label={g.label}>{list.map((x) => <option key={x.sessionId} value={`session:${x.sessionId}`} disabled={x.missing}>{label(x)}</option>)}</optgroup> : null;
+          })}
+          <optgroup label="New"><option value="new">New session in this PR's checkout</option></optgroup>
+        </select>
+      </label>
+      {note && <div className={`note ${warn ? 'warn' : ''}`}>{note}</div>}
+    </div>
+  );
+}
+
+function toTarget(value: string, sessions: AgentSession[]): SendTarget | null {
+  if (value === 'new') return { kind: 'new' };
+  if (value.startsWith('term:')) return { kind: 'term', id: value.slice(5) };
+  const x = sessions.find((s) => `session:${s.sessionId}` === value);
+  return x && x.cwd && !x.missing ? { kind: 'session', sessionId: x.sessionId, cwd: x.cwd, title: (x.summary || x.sessionId).slice(0, 28) } : null;
 }

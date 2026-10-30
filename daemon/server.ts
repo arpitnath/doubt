@@ -6,7 +6,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
-import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, prFiles, prFileDiff, fileAt, lsTree, grep, history, type Commit } from './git.js';
+import { git, parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, prFiles, prFileDiff, fileAt, lsTree, grep, history, type Commit } from './git.js';
 import { Lang } from './lang.js';
 import { WebSocketServer } from 'ws';
 import { listSessions } from '@anthropic-ai/claude-agent-sdk';
@@ -95,6 +95,18 @@ async function openForReview(url: string): Promise<Open> {
   return o;
 }
 
+// Where a session runs, relative to the PR under review: its checkout, another PR's checkout of the
+// same repo, the user's own clone of it (by remote), or unrelated. Remotes are read once per folder.
+const remotes = new Map<string, Promise<string>>();
+async function relation(s: PrState, cwd: string): Promise<'this-pr' | 'other-pr' | 'clone' | 'other'> {
+  if (cwd === s.dir) return 'this-pr';
+  if (cwd.startsWith(`${WORK_ROOT}/${s.owner}-${s.repo}-`)) return 'other-pr';
+  if (cwd.startsWith(`${WORK_ROOT}/`) || !existsSync(cwd)) return 'other';
+  if (!remotes.has(cwd)) remotes.set(cwd, git(cwd, ['remote', '-v']).catch(() => ''));
+  const repo = new RegExp(`github\\.com[:/]${s.owner}/${s.repo}(\\.git)?\\s`, 'i');
+  return repo.test(await remotes.get(cwd)!) ? 'clone' : 'other';
+}
+
 // everything we have ever opened: in memory first, then state files on disk
 function knownPrs(): Array<{ key: string; url: string; owner: string; repo: string; number: number; title: string; author: string; read: number; files: number; open: boolean; updated: number }> {
   const out = new Map<string, ReturnType<typeof knownPrs>[number]>();
@@ -179,9 +191,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // ---- agent sidebar: sessions on disk, terminals running here --------------------------------
   if (req.method === 'GET' && url.pathname === '/api/agent/sessions') {
     const all = await listSessions({ limit: 300 });
-    const sessions = all
-      .map((x) => ({ sessionId: x.sessionId, cwd: x.cwd, gitBranch: x.gitBranch, summary: x.customTitle || x.summary || x.firstPrompt || '', lastModified: x.lastModified, fileSize: x.fileSize }))
-      .sort((a, b) => b.lastModified - a.lastModified);
+    const o = open.get(url.searchParams.get('pr') || '');
+    const sessions = (await Promise.all(all.map(async (x) => ({
+      sessionId: x.sessionId, cwd: x.cwd, gitBranch: x.gitBranch, summary: x.customTitle || x.summary || x.firstPrompt || '', lastModified: x.lastModified, fileSize: x.fileSize,
+      // for a PR: what the session will see when it reads files, from where it runs
+      ...(o && x.cwd ? { group: await relation(o.state, x.cwd), missing: !existsSync(x.cwd) } : {})
+    })))).sort((a, b) => b.lastModified - a.lastModified);
     return json(res, 200, { sessions });
   }
   if (req.method === 'GET' && url.pathname === '/api/agent/terms') return json(res, 200, { terms: listTerms() });
@@ -219,9 +234,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       c.question.trim()
     ].join('\n');
     logEvent({ type: 'doubt', pr: prKey, path: c.path, lines: c.lines });
-    st.doubts.push({ id, chunkId: '', path: c.path, lines: c.lines, question: c.question.trim(), answer: '', at: Date.now(), termCwd: term.cwd, sessionId: term.sessionId, marker, termStartedAt: term.startedAt, done: false });
+    st.doubts.push({ id, chunkId: '', path: c.path, lines: c.lines, question: c.question.trim(), answer: '', at: Date.now(), termCwd: term.cwd, sessionId: term.sessionId, marker, termStartedAt: term.startedAt, title: term.title, done: false });
     save(st);
-    writeTerm(termId, text, true);
+    writeTerm(termId, text, true, true); // a session that is still starting gets it once its input is ready
     return json(res, 200, { ok: true, doubt: id });
   }
   if (req.method === 'POST' && url.pathname === '/api/agent/resolve') {

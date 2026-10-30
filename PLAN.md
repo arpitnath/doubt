@@ -83,21 +83,21 @@ Click the page once after it opens so it has keyboard focus.
 - **Try it:** click a line, Ask a doubt, open Send to.
 - **You should see:** your two earlier PR #1829 sessions under *This PR*; the #1876 and #1826 sessions under *Other PRs* with a "different checkout" warning; `~/Desktop/bruno` sessions under *Your clone* with their branch.
 - **Today:** the comment goes to whichever terminal tab happens to be active.
-- [ ] built · [ ] verified
+- [x] built · [ ] verified
 
 ### 2.2 Agent panel
 - **What changes:** the real Claude Code terminal in a right panel you can show and hide, one tab per session. Sending to "new" starts Claude in the PR checkout first, then delivers the doubt.
 - **Try it:** send a doubt to **New session**; then send a second doubt to an existing #1829 session.
 - **You should see:** the panel opens; the new session starts and receives the full message (file, line, PR, head, code, your question) with nothing cut off; the second doubt opens a second tab.
 - **Today:** start a session by hand first; a comment typed into a session that is still starting can be lost.
-- [ ] built · [ ] verified
+- [x] built · [ ] verified
 
 ### 2.3 Updates tray
 - **What changes:** a list at the top of the agent panel: each doubt with file:line, question, status and session. New answers get a dot and the Agent button shows "n new".
 - **Try it:** send a doubt, then move to another file with › before it is answered.
 - **You should see:** the item gets a dot and the button shows "1 new"; clicking the item opens the file at that line with the answer under it.
 - **Today:** answers show only under their line and in the Doubts tab.
-- [ ] built · [ ] verified
+- [x] built · [ ] verified
 
 ---
 

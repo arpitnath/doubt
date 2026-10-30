@@ -13,9 +13,24 @@ interface Term {
   scrollback: string[]; // ponytail: replay the tail on reconnect; a ring of chunks, not a real buffer
   scrollbackBytes: number;
   sockets: Set<WebSocket>;
+  plain: string; // the recent output without escape codes, to tell when the CLI can take typed text
+  lastOutput: number;
+  queue: Array<{ text: string; submit: boolean }>; // text waiting for the CLI to be ready
 }
 
 const SCROLLBACK_MAX = 400 * 1024;
+const PLAIN_MAX = 4000;
+const QUIET_MS = 400;
+
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '').replace(/\x1b[()][0-9A-Za-z]/g, '');
+
+// Claude Code takes typed text once its input box shows (the ❯ prompt) and its output has gone
+// quiet. The folder-trust question uses ❯ too, so the prompt must come after any mention of
+// trust; that question is the user's to answer, so text waits behind it rather than answering it.
+function ready(t: Term): boolean {
+  const prompt = t.plain.lastIndexOf('❯');
+  return prompt >= 0 && prompt > t.plain.lastIndexOf('trust') && Date.now() - t.lastOutput >= QUIET_MS;
+}
 const terms = new Map<string, Term>();
 
 // Running inside a Claude Code session leaks its env into children; a nested claude must not see it.
@@ -44,8 +59,10 @@ export function openTerm(opts: { sessionId?: string; cwd: string; title: string 
   // a login shell so `claude` resolves the way it does in the user's own terminal;
   // arguments go in as "$@", so nothing from the request is ever parsed by the shell
   const proc = pty.spawn(process.env.SHELL || '/bin/zsh', ['-lc', 'exec claude "$@"', 'claude', ...claudeArgs(opts)], { name: 'xterm-256color', cols: 120, rows: 36, cwd: opts.cwd, env: cleanEnv() });
-  const term: Term = { info: { id, sessionId: opts.sessionId, cwd: opts.cwd, title: opts.title, startedAt: Date.now(), alive: true }, proc, scrollback: [], scrollbackBytes: 0, sockets: new Set() };
+  const term: Term = { info: { id, sessionId: opts.sessionId, cwd: opts.cwd, title: opts.title, startedAt: Date.now(), alive: true }, proc, scrollback: [], scrollbackBytes: 0, sockets: new Set(), plain: '', lastOutput: Date.now(), queue: [] };
   proc.onData((data) => {
+    term.plain = (term.plain + stripAnsi(data)).slice(-PLAIN_MAX);
+    term.lastOutput = Date.now();
     term.scrollback.push(data);
     term.scrollbackBytes += data.length;
     while (term.scrollbackBytes > SCROLLBACK_MAX && term.scrollback.length > 1) term.scrollbackBytes -= term.scrollback.shift()!.length;
@@ -79,14 +96,31 @@ export function closeTerm(id: string): boolean {
 }
 
 // Text typed on the user's behalf. Multi-line text goes in as a bracketed paste so the CLI treats
-// it as one block, then Enter submits it.
-export function writeTerm(id: string, text: string, submit: boolean): boolean {
+// it as one block, then Enter submits it. With `whenReady`, text sent to a CLI that is still starting
+// waits until it can take it, in order.
+export function writeTerm(id: string, text: string, submit: boolean, whenReady = false): boolean {
   const t = terms.get(id);
   if (!t || !t.info.alive) return false;
-  const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
-  t.proc.write(payload);
-  if (submit) setTimeout(() => t.proc.write('\r'), 50); // let the paste land before Enter
+  if (!whenReady || (t.queue.length === 0 && ready(t))) { type(t, text, submit); return true; }
+  t.queue.push({ text, submit });
+  if (t.queue.length === 1) drain(t);
   return true;
+}
+
+function type(t: Term, text: string, submit: boolean): void {
+  t.proc.write(text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text);
+  if (submit) setTimeout(() => t.proc.write('\r'), 50); // let the paste land before Enter
+}
+
+function drain(t: Term): void {
+  const tick = setInterval(() => {
+    if (!t.info.alive) { t.queue = []; clearInterval(tick); return; }
+    if (!ready(t)) return;
+    const next = t.queue.shift();
+    if (next) type(t, next.text, next.submit);
+    if (!t.queue.length) clearInterval(tick);
+  }, 200);
+  tick.unref();
 }
 
 export function attach(id: string, ws: WebSocket): boolean {

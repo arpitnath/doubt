@@ -256,3 +256,24 @@ kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: 
 .linebar.composer .row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
 .linebar.composer .to { flex: 1; color: var(--muted); font-size: 11px; }
 .linebar.composer .to b { color: var(--text); }
+.sendto { margin-top: 8px; }
+.sendto label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
+.sendto select { flex: 1; min-width: 0; font: inherit; font-size: 12px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+.sendto .note { margin-top: 4px; font-size: 12px; color: var(--muted); }
+.sendto .note.warn { color: var(--accent); }
+.top button .badge { margin-left: 6px; }
+.tray { border-bottom: 1px solid var(--line); }
+.tray-head { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; border-radius: 0; background: transparent; padding: 7px 12px; text-align: left; }
+.tray-head span:first-child { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.tray-head .badge { font-size: 11px; padding: 0 7px; border-radius: 9px; background: var(--accent); color: var(--bg); font-weight: 600; }
+.tray-head .arrow { margin-left: auto; color: var(--muted); }
+.tray-list { max-height: 220px; overflow: auto; padding: 0 6px 6px; display: flex; flex-direction: column; gap: 2px; }
+.tray-item { display: flex; gap: 8px; width: 100%; text-align: left; border: 0; border-radius: 6px; background: transparent; padding: 6px 8px; }
+.tray-item.new { background: var(--bg); }
+.tray-item .dot { width: 7px; height: 7px; margin-top: 6px; border-radius: 4px; flex: none; background: transparent; }
+.tray-item.new .dot { background: var(--accent); }
+.tray-item .body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tray-item .where { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); }
+.tray-item .q, .tray-item .st { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tray-item .st { font-size: 11px; color: var(--muted); }
+.tray-item .st.ok { color: var(--ok); }
