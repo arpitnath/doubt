@@ -51,7 +51,7 @@ Click the page once after it opens so it has keyboard focus.
 - **Try it:** switch theme from the top bar, open a diff, reload the page.
 - **You should see:** every surface changes, the diff included, and the choice survives the reload.
 - **Today:** one dark theme.
-- [ ] built · [ ] verified
+- [x] built · [ ] verified
 
 ### 1.2 Buttons instead of keys
 - **What changes:** top bar gets Description, Sync, Agent, ⌘K. File bar gets ‹ ›, Unified/Split, Changes/Whole file, **Mark read**. Keys shrink to `j k space u ⌘K esc`.

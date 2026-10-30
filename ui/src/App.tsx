@@ -5,6 +5,7 @@ import { Tree } from './Tree';
 import { Landing } from './Landing';
 import { Agent, type AgentHandle } from './Agent';
 import { marked } from 'marked';
+import { THEMES, applyTheme, readTheme, type Theme } from './theme';
 
 // hash routing, nothing more: #/ is the landing page, #/pr/<key> is a review
 function useHash(): string {
@@ -49,6 +50,8 @@ function Review({ prKey }: { prKey: string }) {
   const [since, setSince] = useState(false); // interdiff: only what changed since the previous head
   const [showDesc, setShowDesc] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [uiTheme, setUiTheme] = useState<Theme>(readTheme);
+  useEffect(() => applyTheme(uiTheme), [uiTheme]);
   const [openAnswers, setOpenAnswers] = useState<Set<string>>(new Set()); // doubt ids whose inline answer is expanded
   const changedSet = useMemo(() => new Set(pr?.changedSince ?? []), [pr?.changedSince]);
   const agentRef = useRef<AgentHandle>(null);
@@ -481,10 +484,12 @@ function Review({ prKey }: { prKey: string }) {
 
   // ---- render -------------------------------------------------------------------------------------
   const theme = useMemo(() => ({ dark: 'github-dark' as const, light: 'github-light' as const }), []);
+  const themeType = uiTheme === 'light' ? 'light' as const : 'dark' as const; // dim keeps the dark syntax colors
 
   const diffOptionsFor = useCallback((it: Item) => ({
     diffStyle: (fullFile ? 'unified' : split ? 'split' : 'unified') as 'split' | 'unified',
     theme,
+    themeType,
     lineDiffType: 'word' as const,
     stickyHeader: true,
     expandUnchanged: fullFile,
@@ -495,15 +500,16 @@ function Review({ prKey }: { prKey: string }) {
       tokenClick(it.path, p.lineNumber, p.lineCharStart, ev);
     },
     loadDiffFiles: loaderFor(it)
-  }), [fullFile, split, theme, tokenClick]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [fullFile, split, theme, themeType, tokenClick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fileOptionsFor = useCallback((path: string) => ({
     theme,
+    themeType,
     stickyHeader: true,
     enableLineSelection: true,
     onLineSelectionEnd: (range: SelectedLineRange | null) => setSel(range ? { key: path, range } : null),
     onTokenClick: (p: { lineNumber: number; lineCharStart: number }, ev: MouseEvent) => tokenClick(path, p.lineNumber, p.lineCharStart, ev)
-  }), [theme, tokenClick]);
+  }), [theme, themeType, tokenClick]);
 
   type Ann = { hunk?: number; doubt?: string };
   const annotationsFor = useCallback((it: Item): DiffLineAnnotation<Ann>[] => {
@@ -556,6 +562,7 @@ function Review({ prKey }: { prKey: string }) {
         <a className="home" href="#/" title="all pull requests">doubt</a>
         <span className="title">#{pr.number} {pr.title}</span>
         <span className="meta">{pr.owner}/{pr.repo} · {pr.author} · {pr.baseRef} ← {pr.headSha.slice(0, 7)}</span>
+        <button className="theme" onClick={() => setUiTheme((t) => THEMES[(THEMES.indexOf(t) + 1) % THEMES.length])} title="switch theme: dark, dim, light">Theme: {uiTheme}</button>
         <span className="progress"><b>{readCount}</b> / {pr.files.length} files read{noiseLeft ? <> · {noiseLeft} noise, <kbd>n</kbd> skips</> : null}{changedSet.size ? <> · {changedSet.size} changed since {pr.prevHeadSha?.slice(0, 7)}</> : null} · <kbd>r</kbd> sync</span>
       </div>
 
@@ -642,7 +649,7 @@ function Review({ prKey }: { prKey: string }) {
             <div key={it.key} className={`stack ${it.read ? 'understood' : ''}`} data-key={it.key}>
               {patches[it.key] !== undefined
                 ? patches[it.key].trim()
-                  ? <PatchDiff<Ann> key={`${it.key}:${fullFile}:${split}`} patch={patches[it.key]} options={diffOptionsFor(it)} selectedLines={sel?.key === it.key ? sel.range : null} lineAnnotations={annotationsFor(it)} renderAnnotation={renderAnn} disableWorkerPool />
+                  ? <PatchDiff<Ann> key={`${it.key}:${fullFile}:${split}:${themeType}`} patch={patches[it.key]} options={diffOptionsFor(it)} selectedLines={sel?.key === it.key ? sel.range : null} lineAnnotations={annotationsFor(it)} renderAnnotation={renderAnn} disableWorkerPool />
                   : <div className="empty">{it.path}: no textual diff (binary or empty)</div>
                 : <div className="empty">loading {it.path}…</div>}
             </div>
@@ -679,7 +686,7 @@ function Review({ prKey }: { prKey: string }) {
           </div>
         </div>
       )}
-      {agentOpen && <Agent ref={agentRef} workdir={pr.dir} workdirLabel={`${pr.repo}#${pr.number}`} onClose={() => setAgentOpen(false)} />}
+      {agentOpen && <Agent ref={agentRef} theme={uiTheme} workdir={pr.dir} workdirLabel={`${pr.repo}#${pr.number}`} onClose={() => setAgentOpen(false)} />}
 
       {comment !== null && commentTarget && (
         <div className="comment" style={{ right: agentOpen ? 540 : 24, bottom: 24 }}>

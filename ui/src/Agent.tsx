@@ -3,6 +3,7 @@ import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardR
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { termColors, type Theme } from './theme';
 import { agentSessions, agentTerms, closeAgentTerm, openAgentTerm, type AgentSession, type TermInfo } from './api';
 
 export interface AgentHandle {
@@ -11,9 +12,9 @@ export interface AgentHandle {
   activeTitle(): string | null;
 }
 
-interface Props { workdir: string; workdirLabel: string; onClose: () => void }
+interface Props { theme: Theme; workdir: string; workdirLabel: string; onClose: () => void }
 
-export const Agent = forwardRef<AgentHandle, Props>(function Agent({ workdir, workdirLabel, onClose }, ref) {
+export const Agent = forwardRef<AgentHandle, Props>(function Agent({ theme, workdir, workdirLabel, onClose }, ref) {
   const [sessions, setSessions] = useState<AgentSession[] | null>(null);
   const [terms, setTerms] = useState<TermInfo[]>([]);
   const [active, setActive] = useState<string | null>(null);
@@ -86,14 +87,14 @@ export const Agent = forwardRef<AgentHandle, Props>(function Agent({ workdir, wo
 
       {terms.map((t) => (
         <div key={t.id} className="agent-term" style={{ display: t.id === active && !showList ? 'block' : 'none' }}>
-          <Xterm id={t.id} visible={t.id === active && !showList} />
+          <Xterm id={t.id} visible={t.id === active && !showList} theme={theme} />
         </div>
       ))}
     </div>
   );
 });
 
-function Xterm({ id, visible }: { id: string; visible: boolean }) {
+function Xterm({ id, visible, theme }: { id: string; visible: boolean; theme: Theme }) {
   const host = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -101,7 +102,7 @@ function Xterm({ id, visible }: { id: string; visible: boolean }) {
 
   useEffect(() => {
     if (!host.current) return;
-    const term = new Terminal({ cursorBlink: true, fontSize: 12, fontFamily: 'ui-monospace, Menlo, monospace', theme: { background: '#0f1115' }, scrollback: 5000, allowProposedApi: true });
+    const term = new Terminal({ cursorBlink: true, fontSize: 12, fontFamily: 'ui-monospace, Menlo, monospace', theme: termColors(), scrollback: 5000, allowProposedApi: true });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host.current);
@@ -122,6 +123,8 @@ function Xterm({ id, visible }: { id: string; visible: boolean }) {
     ro.observe(host.current);
     return () => { ro.disconnect(); ws.close(); term.dispose(); };
   }, [id]);
+
+  useEffect(() => { if (termRef.current) termRef.current.options.theme = termColors(); }, [theme]);
 
   useEffect(() => {
     if (visible) setTimeout(() => { try { fitRef.current?.fit(); termRef.current?.focus(); } catch { /* not laid out yet */ } }, 30);
