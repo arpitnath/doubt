@@ -112,7 +112,7 @@ async function openForReview(url: string): Promise<Open> {
 const remotes = new Map<string, Promise<string>>();
 async function relation(s: PrState, cwd: string): Promise<'this-pr' | 'other-pr' | 'clone' | 'other'> {
   if (cwd === s.dir) return 'this-pr';
-  if (cwd.startsWith(`${WORK_ROOT}/${s.owner}-${s.repo}-`)) return 'other-pr';
+  if (cwd.startsWith(`${WORK_ROOT}/`) && new RegExp(`^${escapeRe(`${s.owner}-${s.repo}`)}-\\d+$`).test(cwd.slice(WORK_ROOT.length + 1))) return 'other-pr'; // not usebruno-bruno-api-docs-103 for usebruno/bruno
   if (cwd.startsWith(`${WORK_ROOT}/`) || !existsSync(cwd)) return 'other';
   if (!remotes.has(cwd)) remotes.set(cwd, git(cwd, ['remote', '-v']).catch(() => ''));
   const repo = new RegExp(`github\\.com[:/]${s.owner}/${s.repo}(\\.git)?\\s`, 'i');
@@ -134,6 +134,8 @@ async function baseTexts(s: PrState): Promise<Map<string, string>> {
   }));
   return out;
 }
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // everything we have ever opened: in memory first, then state files on disk
 function knownPrs(): Array<{ key: string; url: string; owner: string; repo: string; number: number; title: string; author: string; read: number; files: number; open: boolean; updated: number }> {

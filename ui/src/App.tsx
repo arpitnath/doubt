@@ -3,11 +3,12 @@ import { PatchDiff, File as PierreFile, type DiffLineAnnotation, type FileDiffMe
 import { agentSessions, definitions, fuzzy, hoverAt, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, resolveDoubt, syncPr, isNoise, outline, parseHunks, readingOrder, references, search, setVerdict, type AgentSession, type Chunk, type Doubt, type HoverInfo, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
 import { Tree } from './Tree';
 import { Landing } from './Landing';
-import { Agent, type AgentHandle, type SendTarget } from './Agent';
+import { Agent, type AgentHandle } from './Agent';
 import { marked } from 'marked';
 import { THEMES, applyTheme, readTheme, type Theme } from './theme';
 import { Palette, type PaletteMode, type PaletteState, type Row } from './Palette';
 import { HoverCard } from './HoverCard';
+import { SendTo, toTarget } from './SendTo';
 
 // hash routing, nothing more: #/ is the landing page, #/pr/<key> is a review
 function useHash(): string {
@@ -28,6 +29,19 @@ export function App() {
 }
 
 type Tab = 'files' | 'commits' | 'repo' | 'doubts';
+interface Token { lineNumber: number; lineCharStart: number; tokenText: string; tokenElement: HTMLElement }
+
+// The name under the pointer inside a highlighted token. The highlighter merges same-colored text
+// into one token ("{ useState, useEffect }"); code is monospaced, so x gives the character.
+function nameUnder(p: Token, clientX: number): { name: string; col: number; x: number; y: number } | null {
+  const r = p.tokenElement.getBoundingClientRect();
+  const w = r.width / Math.max(1, p.tokenText.length);
+  const i = Math.floor((clientX - r.left) / w);
+  for (const m of p.tokenText.matchAll(/[A-Za-z_$][\w$]*/g)) {
+    if (i >= m.index! && i < m.index! + m[0].length) return { name: m[0], col: p.lineCharStart + m.index!, x: r.left + m.index! * w, y: r.bottom + 6 };
+  }
+  return null;
+}
 type View = { kind: 'file'; path: string } | { kind: 'commit'; sha: string } | { kind: 'chunk'; id: string } | { kind: 'repo'; path: string };
 interface Item { key: string; path: string; oldPath?: string; oldRev: string; newRev: string; read: boolean; status: string; adds: number; dels: number }
 
@@ -342,25 +356,15 @@ function Review({ prKey }: { prKey: string }) {
       .catch((err) => setToast(err instanceof Error ? err.message : String(err)));
   }, [prKey, showLocs]);
 
-  // hover a name: after a short pause, TypeScript's answers about it, cached per position. The
-  // highlighter merges same-colored text into one token ("{ useState, useEffect }"), so the name is
-  // found under the pointer inside the token: code is monospaced, so x gives the character.
+  // hover a name: after a short pause, TypeScript's answers about it, cached per head and position;
+  // the name is found under the pointer, inside a merged token too
   const hoverAtPointer = useRef<{ el: HTMLElement; move: (e: MouseEvent) => void; shown: string } | null>(null);
-  const tokenEnter = useCallback((path: string, p: { lineNumber: number; lineCharStart: number; tokenText: string; tokenElement: HTMLElement }, ev?: PointerEvent) => {
+  const prHead = pr?.headSha ?? '';
+  const tokenEnter = useCallback((path: string, p: Token, ev?: PointerEvent) => {
     if (hoverAtPointer.current) hoverAtPointer.current.el.removeEventListener('mousemove', hoverAtPointer.current.move);
-    const text = p.tokenText;
-    const nameAt = (clientX: number) => {
-      const r = p.tokenElement.getBoundingClientRect();
-      const w = r.width / Math.max(1, text.length);
-      const i = Math.floor((clientX - r.left) / w);
-      for (const m of text.matchAll(/[A-Za-z_$][\w$]*/g)) {
-        if (i >= m.index! && i < m.index! + m[0].length) return { name: m[0], col: p.lineCharStart + m.index!, x: r.left + m.index! * w, y: r.bottom + 6 };
-      }
-      return null;
-    };
     const show = (clientX: number) => {
-      const hit = nameAt(clientX);
-      const k = hit ? `${path}:${p.lineNumber}:${hit.col}` : '';
+      const hit = nameUnder(p, clientX);
+      const k = hit ? `${prHead}:${path}:${p.lineNumber}:${hit.col}` : ''; // answers belong to one head
       if (hoverAtPointer.current && hoverAtPointer.current.shown === k) return;
       if (hoverAtPointer.current) hoverAtPointer.current.shown = k;
       window.clearTimeout(hoverTimer.current);
@@ -379,7 +383,7 @@ function Review({ prKey }: { prKey: string }) {
     p.tokenElement.addEventListener('mousemove', move);
     hoverAtPointer.current = { el: p.tokenElement, move, shown: '' };
     if (ev) show(ev.clientX);
-  }, [prKey]);
+  }, [prKey, prHead]);
   const tokenLeave = useCallback(() => {
     if (hoverAtPointer.current) { hoverAtPointer.current.el.removeEventListener('mousemove', hoverAtPointer.current.move); hoverAtPointer.current = null; }
     window.clearTimeout(hoverTimer.current);
@@ -387,13 +391,12 @@ function Review({ prKey }: { prKey: string }) {
   }, []);
 
   // a plain click on a name remembers it for the line bar; ⌘-click goes to its definition, ⌘⌥-click lists its references
-  const tokenClick = useCallback((key: string, path: string, p: { lineNumber: number; lineCharStart: number; tokenText: string }, ev: MouseEvent) => {
-    if (!(ev.metaKey || ev.ctrlKey)) {
-      if (/^[A-Za-z_$][\w$]*$/.test(p.tokenText)) setPicked({ key, path, line: p.lineNumber, col: p.lineCharStart, text: p.tokenText });
-      return;
-    }
+  const tokenClick = useCallback((key: string, path: string, p: Token, ev: MouseEvent) => {
+    const hit = nameUnder(p, ev.clientX);
+    if (!hit) return;
+    if (!(ev.metaKey || ev.ctrlKey)) { setPicked({ key, path, line: p.lineNumber, col: hit.col, text: hit.name }); return; }
     ev.preventDefault();
-    lookup(path, p.lineNumber, p.lineCharStart, ev.altKey); // not shift: shift+click is pierre's range selection
+    lookup(path, p.lineNumber, hit.col, ev.altKey); // not shift: shift+click is pierre's range selection
   }, [lookup]);
 
   // ---- copy reference / copy with context (px0's Alt+C / Alt+A) ----------------------------------
@@ -626,12 +629,12 @@ function Review({ prKey }: { prKey: string }) {
       setComment(null);
     },
     onLineSelectionEnd: (range: SelectedLineRange | null) => setSel(range ? { key: it.key, range } : null),
-    onTokenClick: (p: { lineNumber: number; lineCharStart: number; tokenText: string; side?: 'deletions' | 'additions' }, ev: MouseEvent) => {
+    onTokenClick: (p: Token & { side?: 'deletions' | 'additions' }, ev: MouseEvent) => {
       if (p.side === 'deletions') return; // definitions resolve against the new side only
       tokenClick(it.key, it.path, p, ev);
     },
     // hover answers are about the PR head, so the old side of a diff gets none
-    onTokenEnter: (p: { lineNumber: number; lineCharStart: number; tokenText: string; tokenElement: HTMLElement; side?: 'deletions' | 'additions' }, ev: PointerEvent) => { if (p.side !== 'deletions') tokenEnter(it.path, p, ev); },
+    onTokenEnter: (p: Token & { side?: 'deletions' | 'additions' }, ev: PointerEvent) => { if (p.side !== 'deletions') tokenEnter(it.path, p, ev); },
     onTokenLeave: () => tokenLeave(),
     loadDiffFiles: loaderFor(it)
   }), [fullFile, split, theme, themeType, tokenClick, tokenEnter, tokenLeave]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -649,8 +652,8 @@ function Review({ prKey }: { prKey: string }) {
       setComment(null);
     },
     onLineSelectionEnd: (range: SelectedLineRange | null) => setSel(range ? { key: path, range } : null),
-    onTokenClick: (p: { lineNumber: number; lineCharStart: number; tokenText: string }, ev: MouseEvent) => tokenClick(path, path, p, ev),
-    onTokenEnter: (p: { lineNumber: number; lineCharStart: number; tokenText: string; tokenElement: HTMLElement }, ev: PointerEvent) => tokenEnter(path, p, ev),
+    onTokenClick: (p: Token, ev: MouseEvent) => tokenClick(path, path, p, ev),
+    onTokenEnter: (p: Token, ev: PointerEvent) => tokenEnter(path, p, ev),
     onTokenLeave: () => tokenLeave()
   }), [theme, themeType, tokenClick, tokenEnter, tokenLeave]);
 
@@ -853,48 +856,3 @@ function Review({ prKey }: { prKey: string }) {
   );
 }
 
-const GROUPS: Array<{ group: NonNullable<AgentSession['group']>; label: string }> = [
-  { group: 'this-pr', label: 'This PR' },
-  { group: 'other-pr', label: 'Other PRs in this repo' },
-  { group: 'clone', label: 'Your clone of this repo' }
-];
-
-// What each kind of session will see when it reads files, said before the doubt is sent
-const NOTES: Record<string, string> = {
-  term: 'Open in doubt now.',
-  'this-pr': "Runs in this PR's checkout, and keeps what it learned from earlier questions.",
-  'other-pr': "Runs in another PR's checkout: the files it reads will not match this diff.",
-  clone: 'Runs in your own clone: it reads that branch, not this PR, unless told to.',
-  new: "A fresh session in this PR's checkout. It knows nothing yet and reads what it needs."
-};
-
-function SendTo({ value, onChange, sessions, terms }: { value: string; onChange: (v: string) => void; sessions: AgentSession[]; terms: Array<{ id: string; title: string; sessionId?: string }> }) {
-  const open = new Set(terms.map((t) => t.sessionId).filter(Boolean));
-  const chosen = sessions.find((x) => `session:${x.sessionId}` === value);
-  const big = chosen && (chosen.fileSize ?? 0) > 5e6 ? ` ${Math.round((chosen.fileSize ?? 0) / 1e6)} MB of history makes every answer slower and costlier.` : '';
-  const note = value === 'new' ? NOTES.new : value.startsWith('term:') ? NOTES.term : chosen ? (NOTES[chosen.group ?? ''] ?? '') + (chosen.group === 'clone' && chosen.gitBranch ? ` (branch ${chosen.gitBranch})` : '') + big : '';
-  const warn = !!chosen && (chosen.group === 'other-pr' || chosen.group === 'clone' || !!big);
-  const label = (x: AgentSession) => `${(x.summary || '(no summary)').slice(0, 60)} · ${new Date(x.lastModified).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}${x.missing ? ' · folder gone' : ''}`;
-  return (
-    <div className="sendto">
-      <label>Send to
-        <select value={value} onChange={(e) => onChange(e.target.value)}>
-          {terms.length > 0 && <optgroup label="Open in doubt">{terms.map((t) => <option key={t.id} value={`term:${t.id}`}>{t.title}</option>)}</optgroup>}
-          {GROUPS.map((g) => {
-            const list = sessions.filter((x) => x.group === g.group && !open.has(x.sessionId));
-            return list.length ? <optgroup key={g.group} label={g.label}>{list.map((x) => <option key={x.sessionId} value={`session:${x.sessionId}`} disabled={x.missing}>{label(x)}</option>)}</optgroup> : null;
-          })}
-          <optgroup label="New"><option value="new">New session in this PR's checkout</option></optgroup>
-        </select>
-      </label>
-      {note && <div className={`note ${warn ? 'warn' : ''}`}>{note}</div>}
-    </div>
-  );
-}
-
-function toTarget(value: string, sessions: AgentSession[]): SendTarget | null {
-  if (value === 'new') return { kind: 'new' };
-  if (value.startsWith('term:')) return { kind: 'term', id: value.slice(5) };
-  const x = sessions.find((s) => `session:${s.sessionId}` === value);
-  return x && x.cwd && !x.missing ? { kind: 'session', sessionId: x.sessionId, cwd: x.cwd, title: (x.summary || x.sessionId).slice(0, 28) } : null;
-}
