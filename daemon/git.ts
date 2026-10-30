@@ -7,6 +7,9 @@ import { join } from 'node:path';
 
 const execFile = promisify(execFileCb);
 const MAX_BUFFER = 64 * 1024 * 1024; // ponytail: a single file diff is KBs; 64MB is the ceiling, not a design
+// ponytail: one ceiling for every git call so a hung fetch can't hang the daemon; sized for a first
+// clone of a big repo, so a stuck quick call waits as long. Split per call if that ever bites.
+const TIMEOUT = 10 * 60 * 1000;
 
 export interface PrRef { owner: string; repo: string; number: number }
 
@@ -40,6 +43,7 @@ export function authEnv(token: string): NodeJS.ProcessEnv {
 export async function git(dir: string, args: string[], env: NodeJS.ProcessEnv = {}): Promise<string> {
   const { stdout } = await execFile('git', ['-C', dir, '--literal-pathspecs', ...args], {
     maxBuffer: MAX_BUFFER,
+    timeout: TIMEOUT,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...env }
   });
   return stdout;
@@ -66,6 +70,7 @@ export async function checkout(input: CheckoutInput): Promise<Checkout> {
   if (!existsSync(join(dir, '.git'))) {
     await execFile('git', ['clone', '--quiet', '--filter=blob:none', '--no-checkout', cloneUrl, dir], {
       maxBuffer: MAX_BUFFER,
+      timeout: TIMEOUT,
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...env }
     });
   }
@@ -150,15 +155,6 @@ export async function fileDiff(dir: string, commit: Commit, path: string): Promi
   return git(dir, commit.merge
     ? ['show', '--remerge-diff', '--format=', '-p', '--no-color', commit.sha, '--', path]
     : ['diff-tree', '--no-commit-id', '-r', '--root', '-p', '--no-color', commit.sha, '--', path]);
-}
-
-// The session has no shell, so every diff it may need is written where it can Read it.
-export async function commitDiff(dir: string, commit: Commit): Promise<string> {
-  const scratch = join(dir, '.doubt', 'commits');
-  mkdirSync(scratch, { recursive: true });
-  const file = join(scratch, `${commit.sha.slice(0, 7)}.diff`);
-  if (!existsSync(file)) writeFileSync(file, await git(dir, diffArgs(commit, ['-p', '--no-color'])));
-  return file;
 }
 
 // ---- PR-wide (merge-base..head) ---------------------------------------------------------------

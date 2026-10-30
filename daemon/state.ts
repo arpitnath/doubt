@@ -2,7 +2,7 @@
 // Chunk verdicts are the truth. A file counts as read when every chunk of it is read.
 // `readFiles` remembers the blob pair a fully read file had, so after a push only
 // files whose content actually changed come back as unread.
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Commit, PrFile } from './git.js';
@@ -50,9 +50,6 @@ export interface PrState {
   baseRef: string;
   dir: string;
   diffFile: string;
-  sessionId?: string;
-  forkedFrom?: string;
-  shape?: string;
   commits: Commit[];
   chunks: Chunk[];
   files: PrFile[];
@@ -68,6 +65,15 @@ export interface PrState {
 export const DOUBT_HOME = join(homedir(), '.doubt');
 export const WORK_ROOT = join(DOUBT_HOME, 'work');
 export const STATE_ROOT = join(DOUBT_HOME, 'state');
+
+// What the reviewer did, one JSON line each, so reading can be measured later: where a review
+// stopped, time from view to verdict, files settled with no question. Never read by the daemon.
+export function logEvent(event: { type: 'open' | 'view' | 'verdict' | 'doubt'; pr: string; [k: string]: unknown }): void {
+  try {
+    mkdirSync(DOUBT_HOME, { recursive: true });
+    appendFileSync(join(DOUBT_HOME, 'events.jsonl'), `${JSON.stringify({ at: Date.now(), ...event })}\n`);
+  } catch { /* a lost log line must never fail the request it describes */ }
+}
 
 export function stateKey(s: Pick<PrState, 'owner' | 'repo' | 'number'>): string {
   return `${s.owner}-${s.repo}-${s.number}`;

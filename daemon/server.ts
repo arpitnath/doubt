@@ -1,13 +1,12 @@
 // doubt daemon. Usage: tsx daemon/server.ts [github-pr-url] [--port 7880] [--no-open]
 // Runs once. PRs are opened from the page (POST /api/open) and kept side by side; every route
-// takes `pr=<key>`. Serves the UI from ui/dist, state, diffs, file contents, and streams Claude
-// answers over SSE (the UI does not use those routes right now).
+// takes `pr=<key>`. Serves the UI from ui/dist, state, diffs, file contents, and the agent terminals.
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
-import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, commitDiff, prFiles, prFileDiff, fileAt, lsTree, grep, history, type Commit } from './git.js';
+import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, prFiles, prFileDiff, fileAt, lsTree, grep, history, type Commit } from './git.js';
 import { Lang } from './lang.js';
 import { WebSocketServer } from 'ws';
 import { listSessions } from '@anthropic-ai/claude-agent-sdk';
@@ -16,8 +15,7 @@ import { computeSignals } from './signals.js';
 import { transcriptFor, answerTo, sessionIdOf } from './transcript.js';
 import { readFileSync as readText } from 'node:fs';
 import { ghToken, prMeta } from './github.js';
-import { load, save, carryOver, stateKey, WORK_ROOT, STATE_ROOT, type PrState, type Chunk, type Verdict } from './state.js';
-import { ask, sessionsFor, shapePrompt, doubtPrompt, commitDoubtPrompt, takePrompt, type AgentEvent } from './agent.js';
+import { load, save, carryOver, logEvent, stateKey, WORK_ROOT, STATE_ROOT, type PrState, type Chunk, type Verdict } from './state.js';
 
 const args = process.argv.slice(2);
 const bootUrl = args.find((a) => a.startsWith('http'));
@@ -29,7 +27,7 @@ const uiDist = join(here, '..', 'ui', 'dist');
 
 // ---- open PRs -----------------------------------------------------------------------------------
 
-interface Open { state: PrState; commitBySha: Map<string, Commit>; treePaths: string[]; busy: boolean; openedAt: number; lang?: Lang }
+interface Open { state: PrState; commitBySha: Map<string, Commit>; treePaths: string[]; openedAt: number; lang?: Lang }
 const open = new Map<string, Open>();
 const opening = new Map<string, Promise<Open>>(); // ponytail: a double paste must not clone twice
 
@@ -74,21 +72,27 @@ async function openPr(url: string, force = false): Promise<Open> {
         headSha: meta.headSha, baseSha: co.baseSha, baseRef: meta.baseRef,
         dir: co.dir, diffFile, commits: list, chunks, files, readFiles: {}, doubts: prev?.doubts ?? [],
         hunkMarks: {}, prevHeadSha: prev?.headSha, changedSince, body: meta.body,
-        signals: computeSignals(co.dir, readText(diffFile, 'utf8'), chunks),
-        sessionId: prev?.sessionId, forkedFrom: prev?.forkedFrom, shape: prev?.shape
+        signals: computeSignals(co.dir, readText(diffFile, 'utf8'), chunks)
       };
       carryOver(state, prev);
       save(state);
       console.error(`> ${list.length} commits, ${chunks.length} chunks, ${files.length} files${prev ? ` (new head; ${changedSince.length} changed, ${Object.keys(state.readFiles).length} read files carried over)` : ''}`);
     }
 
-    const o: Open = { state, commitBySha: new Map(state.commits.map((c) => [c.sha, c])), treePaths: await lsTree(state.dir, state.headSha), busy: false, openedAt: have?.openedAt ?? Date.now(), lang: state.headSha === have?.state.headSha ? have?.lang : undefined };
+    const o: Open = { state, commitBySha: new Map(state.commits.map((c) => [c.sha, c])), treePaths: await lsTree(state.dir, state.headSha), openedAt: have?.openedAt ?? Date.now(), lang: state.headSha === have?.state.headSha ? have?.lang : undefined };
     open.set(key, o);
     return o;
   })();
 
   opening.set(key, p);
   try { return await p; } finally { opening.delete(key); }
+}
+
+// A person opening a PR, from the page or the command line; a sync refetch is not an open.
+async function openForReview(url: string): Promise<Open> {
+  const o = await openPr(url);
+  logEvent({ type: 'open', pr: stateKey(o.state), head: o.state.headSha });
+  return o;
 }
 
 // everything we have ever opened: in memory first, then state files on disk
@@ -123,20 +127,6 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   return raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 }
 
-// Caller has already taken `o.busy`; this always releases it.
-async function streamAgent(o: Open, res: ServerResponse, events: AsyncGenerator<AgentEvent>, onDone: (ev: Extract<AgentEvent, { type: 'done' }>) => void): Promise<void> {
-  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
-  try {
-    for await (const ev of events) {
-      if (ev.type === 'done') onDone(ev);
-      res.write(`data: ${JSON.stringify(ev)}\n\n`);
-    }
-  } finally {
-    o.busy = false;
-    res.end();
-  }
-}
-
 const MIME: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.wasm': 'application/wasm' };
 
 function serveStatic(res: ServerResponse, path: string): void {
@@ -161,10 +151,18 @@ const VERDICTS: Verdict[] = ['none', 'understood', 'doubt'];
 
 // ---- routes -------------------------------------------------------------------------------------
 
+// Only the local page may talk to the daemon. A DNS-rebinding page arrives with a foreign Host; any
+// other site's page arrives with our Host but its own Origin (browsers send Origin on every POST and
+// WebSocket). No Origin means a non-browser client, like curl, which is already on this machine.
+function fromLocalPage(req: IncomingMessage): boolean {
+  const host = req.headers.host || '';
+  if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return false;
+  const origin = req.headers.origin;
+  return !origin || origin === `http://${host}`;
+}
+
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  // Only the local page may talk to the API: a DNS-rebinding page arrives with a foreign Host.
-  const host = (req.headers.host || '').split(':')[0];
-  if (host !== '127.0.0.1' && host !== 'localhost') return json(res, 403, { error: 'local only' });
+  if (!fromLocalPage(req)) return json(res, 403, { error: 'local only' });
 
   const url = new URL(req.url || '/', `http://localhost:${port}`);
 
@@ -174,7 +172,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJson(req);
     const target = String(body.url || '').trim();
     if (!/github\.com\/[^/]+\/[^/]+\/pull\/\d+/.test(target)) return json(res, 400, { error: 'paste a GitHub pull request URL' });
-    const o = await openPr(target);
+    const o = await openForReview(target);
     return json(res, 200, { key: stateKey(o.state) });
   }
 
@@ -182,7 +180,6 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method === 'GET' && url.pathname === '/api/agent/sessions') {
     const all = await listSessions({ limit: 300 });
     const sessions = all
-      .filter((x) => !(x.cwd || '').startsWith(WORK_ROOT) || true)
       .map((x) => ({ sessionId: x.sessionId, cwd: x.cwd, gitBranch: x.gitBranch, summary: x.customTitle || x.summary || x.firstPrompt || '', lastModified: x.lastModified, fileSize: x.fileSize }))
       .sort((a, b) => b.lastModified - a.lastModified);
     return json(res, 200, { sessions });
@@ -221,6 +218,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       ...(c.snippet ? ['```', c.snippet, '```'] : []),
       c.question.trim()
     ].join('\n');
+    logEvent({ type: 'doubt', pr: prKey, path: c.path, lines: c.lines });
     st.doubts.push({ id, chunkId: '', path: c.path, lines: c.lines, question: c.question.trim(), answer: '', at: Date.now(), termCwd: term.cwd, sessionId: term.sessionId, marker, termStartedAt: term.startedAt, done: false });
     save(st);
     writeTerm(termId, text, true);
@@ -242,7 +240,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (!o) return json(res, 404, { error: 'pr not open' });
   const s = o.state;
 
-  if (req.method === 'GET' && url.pathname === '/api/pr') return json(res, 200, { ...s, busy: o.busy });
+  if (req.method === 'GET' && url.pathname === '/api/pr') return json(res, 200, s);
 
   // on-demand sync: refetch the head; a new head rebuilds, keeps marks for untouched files, records what changed
   if (req.method === 'POST' && url.pathname === '/api/sync') {
@@ -301,6 +299,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (path) {
       const f = s.files.find((x) => x.path === path);
       if (!f) return json(res, 404, { error: 'unknown file' });
+      logEvent({ type: 'view', pr: stateKey(s), path });
       // since=1: only what changed between the previous head and this one, for a file that came back unread
       if (url.searchParams.get('since') === '1' && s.prevHeadSha) {
         try { return json(res, 200, { file: f, since: true, patch: await prFileDiff(s.dir, s.prevHeadSha, s.headSha, f.path, f.oldPath) }); }
@@ -310,6 +309,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
     const chunk = s.chunks.find((c) => c.id === url.searchParams.get('chunk'));
     if (!chunk) return json(res, 404, { error: 'unknown chunk' });
+    logEvent({ type: 'view', pr: stateKey(s), chunk: chunk.id });
     const commit = o.commitBySha.get(chunk.sha);
     if (!commit) return json(res, 404, { error: 'unknown commit' });
     return json(res, 200, { chunk, patch: await fileDiff(s.dir, commit, chunk.path) });
@@ -338,80 +338,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!targets.length) return json(res, 404, { error: 'nothing matched' });
     for (const c of targets) c.verdict = body.verdict as Verdict;
     save(s);
+    // which target says whether this was one deliberate read or a bulk one (a commit, `n` on noise)
+    logEvent({ type: 'verdict', pr: stateKey(s), verdict: body.verdict, target: body.sha ? 'commit' : body.path ? 'file' : body.paths ? 'files' : 'chunk', count: targets.length, path: body.path });
     return json(res, 200, { ok: true, count: targets.length, readFiles: s.readFiles });
-  }
-
-  if (req.method === 'GET' && url.pathname === '/api/sessions') {
-    const list = await sessionsFor(s.repo, WORK_ROOT);
-    return json(res, 200, list.map((x) => ({ sessionId: x.sessionId, cwd: x.cwd, gitBranch: x.gitBranch, summary: x.summary || x.firstPrompt || '', lastModified: x.lastModified, fileSize: x.fileSize })));
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/session') {
-    if (o.busy) return json(res, 409, { error: 'busy' });
-    o.busy = true; // taken before any await; streamAgent releases it
-    try {
-      const body = await readJson(req);
-      const forkFrom = typeof body.forkFrom === 'string' && body.forkFrom ? body.forkFrom : undefined;
-      s.forkedFrom = forkFrom;
-      s.sessionId = undefined;
-      return await streamAgent(o, res, ask({ dir: s.dir, message: shapePrompt(s), forkFrom }), (ev) => {
-        s.sessionId = ev.sessionId;
-        s.shape = ev.text;
-        save(s);
-      });
-    } catch (err) {
-      o.busy = false;
-      throw err;
-    }
-  }
-
-  // One route for three moves: a doubt on a file chunk, a doubt on a whole commit (`sha`, no chunkId),
-  // or a "take" (`take: true`): pull the file or commit into the session with no question and no verdict change.
-  if (req.method === 'POST' && url.pathname === '/api/doubt') {
-    if (o.busy) return json(res, 409, { error: 'busy' });
-    if (!s.sessionId) return json(res, 400, { error: 'no session yet' });
-    o.busy = true;
-    try {
-      const body = await readJson(req);
-      const take = body.take === true;
-      const lines = body.lines as { start: number; end: number } | undefined;
-      const question = String(body.question || '').trim();
-      if (!take && !question) { o.busy = false; return json(res, 400, { error: 'empty question' }); }
-
-      let message: string;
-      let chunkId: string;
-      if (typeof body.chunkId === 'string') {
-        const chunk = s.chunks.find((c) => c.id === body.chunkId);
-        const commit = chunk && o.commitBySha.get(chunk.sha);
-        if (!chunk || !commit) { o.busy = false; return json(res, 404, { error: 'unknown chunk' }); }
-        const diff = await commitDiff(s.dir, commit);
-        chunkId = chunk.id;
-        message = take ? takePrompt({ chunk }, diff) : doubtPrompt(chunk, lines, question, diff);
-        if (!take) chunk.verdict = 'doubt';
-      } else if (typeof body.sha === 'string') {
-        const commit = o.commitBySha.get(body.sha);
-        const paths = s.chunks.filter((c) => c.sha === body.sha).map((c) => c.path);
-        if (!commit || !paths.length) { o.busy = false; return json(res, 404, { error: 'unknown commit' }); }
-        const diff = await commitDiff(s.dir, commit);
-        chunkId = `${commit.sha.slice(0, 7)}:*`;
-        message = take ? takePrompt({ sha: commit.sha, subject: commit.subject, paths }, diff) : commitDoubtPrompt(commit.sha, commit.subject, question, diff);
-        if (!take) for (const c of s.chunks) if (c.sha === body.sha && c.verdict === 'none') c.verdict = 'doubt';
-      } else {
-        o.busy = false;
-        return json(res, 400, { error: 'chunkId or sha required' });
-      }
-
-      const doubt = { id: `${Date.now().toString(36)}`, chunkId, lines, question: take ? '(take)' : question, answer: '', at: Date.now() };
-      s.doubts.push(doubt);
-      save(s);
-      return await streamAgent(o, res, ask({ dir: s.dir, message, sessionId: s.sessionId }), (ev) => {
-        doubt.answer = ev.text;
-        save(s);
-      });
-    } catch (err) {
-      o.busy = false;
-      throw err;
-    }
   }
 
   json(res, 404, { error: 'not found' });
@@ -444,9 +373,8 @@ setInterval(() => {
 
 const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
-  const host = (req.headers.host || '').split(':')[0];
   const url = new URL(req.url || '/', `http://localhost:${port}`);
-  if ((host !== '127.0.0.1' && host !== 'localhost') || url.pathname !== '/ws/term') { socket.destroy(); return; }
+  if (!fromLocalPage(req) || url.pathname !== '/ws/term') { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, (ws) => {
     if (!attach(url.searchParams.get('id') || '', ws)) ws.close();
   });
@@ -457,7 +385,7 @@ server.listen(port, '127.0.0.1', async () => {
   const base = `http://127.0.0.1:${port}`;
   let target = base;
   if (bootUrl) {
-    try { target = `${base}/#/pr/${stateKey((await openPr(bootUrl)).state)}`; } catch (err) { console.error(err); }
+    try { target = `${base}/#/pr/${stateKey((await openForReview(bootUrl)).state)}`; } catch (err) { console.error(err); }
   }
   console.error(`> doubt: ${target}`);
   if (!noOpen) execFile('open', [target], () => {});

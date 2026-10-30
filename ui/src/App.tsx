@@ -24,7 +24,6 @@ export function App() {
   return <Review key={m[1]} prKey={decodeURIComponent(m[1])} />;
 }
 
-// ponytail: the Claude room is out of the UI for now; the daemon still serves /api/session and /api/doubt.
 type Tab = 'files' | 'commits' | 'repo' | 'doubts';
 type View = { kind: 'file'; path: string } | { kind: 'commit'; sha: string } | { kind: 'chunk'; id: string } | { kind: 'repo'; path: string };
 interface Item { key: string; path: string; oldPath?: string; oldRev: string; newRev: string; read: boolean; status: string; adds: number; dels: number }

@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import type { PrRef } from './git.js';
 
 const execFile = promisify(execFileCb);
+const TIMEOUT = 30 * 1000; // gh answers in about a second; this only stops a hung call
 
 export interface PrMeta {
   title: string;
@@ -20,7 +21,7 @@ export interface PrMeta {
 
 export async function ghToken(): Promise<string> {
   try {
-    const { stdout } = await execFile('gh', ['auth', 'token']);
+    const { stdout } = await execFile('gh', ['auth', 'token'], { timeout: TIMEOUT });
     return stdout.trim();
   } catch {
     return process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '';
@@ -29,6 +30,6 @@ export async function ghToken(): Promise<string> {
 
 export async function prMeta(ref: PrRef): Promise<PrMeta> {
   const jq = '{title, author: .user.login, state, merged, baseRef: .base.ref, baseSha: .base.sha, headRef: .head.ref, headSha: .head.sha, cloneUrl: .base.repo.clone_url, body: (.body // "")}';
-  const { stdout } = await execFile('gh', ['api', `repos/${ref.owner}/${ref.repo}/pulls/${ref.number}`, '--jq', jq], { maxBuffer: 1024 * 1024 });
+  const { stdout } = await execFile('gh', ['api', `repos/${ref.owner}/${ref.repo}/pulls/${ref.number}`, '--jq', jq], { maxBuffer: 1024 * 1024, timeout: TIMEOUT });
   return JSON.parse(stdout) as PrMeta;
 }

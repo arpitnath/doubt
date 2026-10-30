@@ -3,6 +3,7 @@
 // re-implemented; the CLI is the CLI.
 import * as pty from 'node-pty';
 import type { WebSocket } from 'ws';
+import { WORK_ROOT } from './state.js';
 
 export interface TermInfo { id: string; sessionId?: string; cwd: string; title: string; startedAt: number; alive: boolean }
 
@@ -30,11 +31,19 @@ function cleanEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+// A PR checkout is someone else's code: its .claude/settings.json (hooks, permissions) must not
+// configure the reviewer's Claude. Only user settings load there. The user's own projects keep theirs.
+function claudeArgs(opts: { sessionId?: string; cwd: string }): string[] {
+  const args = opts.sessionId ? ['--resume', opts.sessionId] : [];
+  if (opts.cwd.startsWith(`${WORK_ROOT}/`)) args.push('--setting-sources', 'user');
+  return args;
+}
+
 export function openTerm(opts: { sessionId?: string; cwd: string; title: string }): TermInfo {
   const id = Math.random().toString(36).slice(2, 10);
-  const cmd = opts.sessionId ? `exec claude --resume ${JSON.stringify(opts.sessionId)}` : 'exec claude';
-  // a login shell so `claude` resolves the way it does in the user's own terminal
-  const proc = pty.spawn(process.env.SHELL || '/bin/zsh', ['-lc', cmd], { name: 'xterm-256color', cols: 120, rows: 36, cwd: opts.cwd, env: cleanEnv() });
+  // a login shell so `claude` resolves the way it does in the user's own terminal;
+  // arguments go in as "$@", so nothing from the request is ever parsed by the shell
+  const proc = pty.spawn(process.env.SHELL || '/bin/zsh', ['-lc', 'exec claude "$@"', 'claude', ...claudeArgs(opts)], { name: 'xterm-256color', cols: 120, rows: 36, cwd: opts.cwd, env: cleanEnv() });
   const term: Term = { info: { id, sessionId: opts.sessionId, cwd: opts.cwd, title: opts.title, startedAt: Date.now(), alive: true }, proc, scrollback: [], scrollbackBytes: 0, sockets: new Set() };
   proc.onData((data) => {
     term.scrollback.push(data);
