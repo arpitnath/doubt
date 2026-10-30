@@ -51,6 +51,10 @@ export const definitions = (key: string, path: string, line: number, col: number
   fetch(`/api/def${q(key, `&path=${encodeURIComponent(path)}&line=${line}&col=${col}`)}`).then((r) => ok(r));
 export const references = (key: string, path: string, line: number, col: number): Promise<{ locs: Loc[] }> =>
   fetch(`/api/refs${q(key, `&path=${encodeURIComponent(path)}&line=${line}&col=${col}`)}`).then((r) => ok(r));
+// refs: how many files use the name; changed: those of them this PR also changes
+export interface HoverInfo { sig: string; doc: string; def?: Loc; builtIn: boolean; lib?: string; refs: number; changed: string[]; before?: string }
+export const hoverAt = (key: string, path: string, line: number, col: number): Promise<{ hover: HoverInfo | null }> =>
+  fetch(`/api/hover${q(key, `&path=${encodeURIComponent(path)}&line=${line}&col=${col}`)}`).then((r) => ok(r));
 
 // symbol outline, px0's regex fallback: no parser, one pattern per language family
 export interface Sym { name: string; kind: string; line: number }

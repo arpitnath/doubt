@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PatchDiff, File as PierreFile, type DiffLineAnnotation, type FileDiffMetadata, type FileDiffLoadedFiles, type SelectedLineRange } from '@pierre/diffs/react';
-import { agentSessions, definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, resolveDoubt, syncPr, isNoise, outline, parseHunks, readingOrder, references, search, setVerdict, type AgentSession, type Chunk, type Doubt, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
+import { agentSessions, definitions, fuzzy, hoverAt, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, resolveDoubt, syncPr, isNoise, outline, parseHunks, readingOrder, references, search, setVerdict, type AgentSession, type Chunk, type Doubt, type HoverInfo, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
 import { Tree } from './Tree';
 import { Landing } from './Landing';
 import { Agent, type AgentHandle, type SendTarget } from './Agent';
 import { marked } from 'marked';
 import { THEMES, applyTheme, readTheme, type Theme } from './theme';
 import { Palette, type PaletteMode, type PaletteState, type Row } from './Palette';
+import { HoverCard } from './HoverCard';
 
 // hash routing, nothing more: #/ is the landing page, #/pr/<key> is a review
 function useHash(): string {
@@ -54,6 +55,9 @@ function Review({ prKey }: { prKey: string }) {
   const [sendTo, setSendTo] = useState('new'); // 'term:<id>' | 'session:<id>' | 'new'
   const [sendSessions, setSendSessions] = useState<AgentSession[]>([]);
   const [seen, setSeen] = useState<Set<string> | null>(null); // answers already looked at; null until loaded
+  const [hover, setHover] = useState<{ name: string; x: number; y: number; info: HoverInfo | null } | null>(null);
+  const hoverCache = useRef(new Map<string, HoverInfo | null>());
+  const hoverTimer = useRef<number | undefined>(undefined);
   const [picked, setPicked] = useState<{ key: string; path: string; line: number; col: number; text: string } | null>(null); // the name last clicked in the code
   const changedSet = useMemo(() => new Set(pr?.changedSince ?? []), [pr?.changedSince]);
   const agentRef = useRef<AgentHandle>(null);
@@ -338,6 +342,50 @@ function Review({ prKey }: { prKey: string }) {
       .catch((err) => setToast(err instanceof Error ? err.message : String(err)));
   }, [prKey, showLocs]);
 
+  // hover a name: after a short pause, TypeScript's answers about it, cached per position. The
+  // highlighter merges same-colored text into one token ("{ useState, useEffect }"), so the name is
+  // found under the pointer inside the token: code is monospaced, so x gives the character.
+  const hoverAtPointer = useRef<{ el: HTMLElement; move: (e: MouseEvent) => void; shown: string } | null>(null);
+  const tokenEnter = useCallback((path: string, p: { lineNumber: number; lineCharStart: number; tokenText: string; tokenElement: HTMLElement }, ev?: PointerEvent) => {
+    if (hoverAtPointer.current) hoverAtPointer.current.el.removeEventListener('mousemove', hoverAtPointer.current.move);
+    const text = p.tokenText;
+    const nameAt = (clientX: number) => {
+      const r = p.tokenElement.getBoundingClientRect();
+      const w = r.width / Math.max(1, text.length);
+      const i = Math.floor((clientX - r.left) / w);
+      for (const m of text.matchAll(/[A-Za-z_$][\w$]*/g)) {
+        if (i >= m.index! && i < m.index! + m[0].length) return { name: m[0], col: p.lineCharStart + m.index!, x: r.left + m.index! * w, y: r.bottom + 6 };
+      }
+      return null;
+    };
+    const show = (clientX: number) => {
+      const hit = nameAt(clientX);
+      const k = hit ? `${path}:${p.lineNumber}:${hit.col}` : '';
+      if (hoverAtPointer.current && hoverAtPointer.current.shown === k) return;
+      if (hoverAtPointer.current) hoverAtPointer.current.shown = k;
+      window.clearTimeout(hoverTimer.current);
+      if (!hit) { hoverTimer.current = window.setTimeout(() => setHover(null), 200); return; }
+      hoverTimer.current = window.setTimeout(() => {
+        const at = { name: hit.name, x: hit.x, y: hit.y };
+        if (hoverCache.current.has(k)) { const info = hoverCache.current.get(k)!; setHover(info ? { ...at, info } : null); return; }
+        setHover({ ...at, info: null });
+        hoverAt(prKey, path, p.lineNumber, hit.col).then((res) => {
+          hoverCache.current.set(k, res.hover);
+          setHover((h) => (h && h.name === at.name && h.x === at.x && h.y === at.y ? (res.hover ? { ...at, info: res.hover } : null) : h));
+        }).catch(() => setHover(null));
+      }, 300);
+    };
+    const move = (e: MouseEvent) => show(e.clientX);
+    p.tokenElement.addEventListener('mousemove', move);
+    hoverAtPointer.current = { el: p.tokenElement, move, shown: '' };
+    if (ev) show(ev.clientX);
+  }, [prKey]);
+  const tokenLeave = useCallback(() => {
+    if (hoverAtPointer.current) { hoverAtPointer.current.el.removeEventListener('mousemove', hoverAtPointer.current.move); hoverAtPointer.current = null; }
+    window.clearTimeout(hoverTimer.current);
+    hoverTimer.current = window.setTimeout(() => setHover(null), 200); // time to move onto the card
+  }, []);
+
   // a plain click on a name remembers it for the line bar; ⌘-click goes to its definition, ⌘⌥-click lists its references
   const tokenClick = useCallback((key: string, path: string, p: { lineNumber: number; lineCharStart: number; tokenText: string }, ev: MouseEvent) => {
     if (!(ev.metaKey || ev.ctrlKey)) {
@@ -582,8 +630,11 @@ function Review({ prKey }: { prKey: string }) {
       if (p.side === 'deletions') return; // definitions resolve against the new side only
       tokenClick(it.key, it.path, p, ev);
     },
+    // hover answers are about the PR head, so the old side of a diff gets none
+    onTokenEnter: (p: { lineNumber: number; lineCharStart: number; tokenText: string; tokenElement: HTMLElement; side?: 'deletions' | 'additions' }, ev: PointerEvent) => { if (p.side !== 'deletions') tokenEnter(it.path, p, ev); },
+    onTokenLeave: () => tokenLeave(),
     loadDiffFiles: loaderFor(it)
-  }), [fullFile, split, theme, themeType, tokenClick]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [fullFile, split, theme, themeType, tokenClick, tokenEnter, tokenLeave]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fileOptionsFor = useCallback((path: string) => ({
     theme,
@@ -598,8 +649,10 @@ function Review({ prKey }: { prKey: string }) {
       setComment(null);
     },
     onLineSelectionEnd: (range: SelectedLineRange | null) => setSel(range ? { key: path, range } : null),
-    onTokenClick: (p: { lineNumber: number; lineCharStart: number; tokenText: string }, ev: MouseEvent) => tokenClick(path, path, p, ev)
-  }), [theme, themeType, tokenClick]);
+    onTokenClick: (p: { lineNumber: number; lineCharStart: number; tokenText: string }, ev: MouseEvent) => tokenClick(path, path, p, ev),
+    onTokenEnter: (p: { lineNumber: number; lineCharStart: number; tokenText: string; tokenElement: HTMLElement }, ev: PointerEvent) => tokenEnter(path, p, ev),
+    onTokenLeave: () => tokenLeave()
+  }), [theme, themeType, tokenClick, tokenEnter, tokenLeave]);
 
   type Ann = { doubt?: string; bar?: boolean };
   const annotationsFor = useCallback((it: Item): DiffLineAnnotation<Ann>[] => {
@@ -791,6 +844,10 @@ function Review({ prKey }: { prKey: string }) {
       )}
       <Agent ref={agentRef} open={agentOpen} theme={uiTheme} workdir={pr.dir} workdirLabel={`${pr.repo}#${pr.number}`} doubts={pr.doubts} seen={seen ?? new Set()} onPickDoubt={pickDoubt} onClose={() => setAgentOpen(false)} />
 
+      {hover && (
+        <HoverCard info={hover.info} name={hover.name} x={hover.x} y={hover.y} onOpen={(p, l) => { setHover(null); openPath(p, l); }}
+          onEnter={() => window.clearTimeout(hoverTimer.current)} onLeave={tokenLeave} />
+      )}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );

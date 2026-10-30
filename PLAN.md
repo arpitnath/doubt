@@ -112,7 +112,7 @@ Click the page once after it opens so it has keyboard focus.
   - `React`, `useState`: from `react`, types not installed.
   - `setTimeout`: built into JavaScript and the browser.
 - **Today:** no hover.
-- [ ] built · [ ] verified
+- [x] built · [ ] verified
 
 ### 3.3 Signature before and after
 - **What changes:** when this PR changed a signature, the card shows it before and after.
@@ -122,7 +122,7 @@ Click the page once after it opens so it has keyboard focus.
   - `delay`: before `any`, after `number`.
   - `shutdown`: before `() => …`, after `(opts) => …`.
 - **Today:** no way to see this without opening the base file.
-- [ ] built · [ ] verified
+- [x] built · [ ] verified
 
 ---
 

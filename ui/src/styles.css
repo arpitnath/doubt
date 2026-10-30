@@ -277,3 +277,16 @@ kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: 
 .tray-item .q, .tray-item .st { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tray-item .st { font-size: 11px; color: var(--muted); }
 .tray-item .st.ok { color: var(--ok); }
+.hovercard { position: fixed; z-index: 12; width: 460px; max-width: calc(100vw - 16px); display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 12px 32px rgba(0,0,0,0.35); font-size: 12.5px; line-height: 1.45; }
+.hovercard code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; word-break: break-word; }
+.hovercard .sig { color: var(--text); }
+.hovercard .lib { color: var(--accent); }
+.hovercard .doc { color: var(--muted); white-space: pre-wrap; }
+.hovercard .before { display: flex; flex-direction: column; gap: 4px; padding: 8px; border-radius: 6px; background: var(--bg); }
+.hovercard .before .label { color: var(--accent); font-size: 11px; }
+.hovercard .before code:first-of-type { color: var(--muted); }
+.hovercard .facts { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; border-top: 1px solid var(--line); padding-top: 8px; }
+.hovercard .link { border: 0; padding: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.hovercard .link:hover { text-decoration: underline; }
+.hovercard .link.changed { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--accent); }
+.hovercard .muted { color: var(--muted); }

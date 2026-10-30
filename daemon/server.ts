@@ -6,7 +6,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
-import { git, parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, prFiles, prFileDiff, fileAt, lsTree, grep, history, type Commit } from './git.js';
+import { git, authEnv, parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, prFiles, prFileDiff, fileAt, lsTree, grep, history, type Commit } from './git.js';
 import { Lang } from './lang.js';
 import { WebSocketServer } from 'ws';
 import { listSessions } from '@anthropic-ai/claude-agent-sdk';
@@ -27,7 +27,7 @@ const uiDist = join(here, '..', 'ui', 'dist');
 
 // ---- open PRs -----------------------------------------------------------------------------------
 
-interface Open { state: PrState; commitBySha: Map<string, Commit>; treePaths: string[]; openedAt: number; lang?: Lang }
+interface Open { state: PrState; commitBySha: Map<string, Commit>; treePaths: string[]; openedAt: number; lang?: Lang; base?: Promise<Map<string, string>> }
 const open = new Map<string, Open>();
 const opening = new Map<string, Promise<Open>>(); // ponytail: a double paste must not clone twice
 
@@ -81,6 +81,18 @@ async function openPr(url: string, force = false): Promise<Open> {
 
     const o: Open = { state, commitBySha: new Map(state.commits.map((c) => [c.sha, c])), treePaths: await lsTree(state.dir, state.headSha), openedAt: have?.openedAt ?? Date.now(), lang: state.headSha === have?.state.headSha ? have?.lang : undefined };
     open.set(key, o);
+    // ponytail: build the language service for the first source file once the page has loaded it, then
+    // the base texts and the base project for "signature before"; together they hold the event loop for
+    // about 3s, once per PR. Move them to a worker if that ever shows.
+    const first = state.files.find((f) => f.kind === 'src' && /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f.path));
+    if (first && !o.lang) setTimeout(async () => {
+      try {
+        const lang = langOf(o);
+        lang.warm(first.path);
+        lang.setBase(await (o.base ??= baseTexts(o.state)));
+        lang.warm(first.path, true);
+      } catch { /* the first hover builds what is missing */ }
+    }, 2000).unref();
     return o;
   })();
 
@@ -105,6 +117,22 @@ async function relation(s: PrState, cwd: string): Promise<'this-pr' | 'other-pr'
   if (!remotes.has(cwd)) remotes.set(cwd, git(cwd, ['remote', '-v']).catch(() => ''));
   const repo = new RegExp(`github\\.com[:/]${s.owner}/${s.repo}(\\.git)?\\s`, 'i');
   return repo.test(await remotes.get(cwd)!) ? 'clone' : 'other';
+}
+
+function langOf(o: Open): Lang {
+  if (!o.lang) { console.error(`> building language service for ${o.state.owner}/${o.state.repo}#${o.state.number}`); o.lang = new Lang(o.state.dir, o.treePaths); }
+  return o.lang;
+}
+
+// The PR base's text of every file the PR modifies or renames, by absolute head path, for "signature
+// before". The clone is blob-filtered, so git may fetch these, which needs the token.
+async function baseTexts(s: PrState): Promise<Map<string, string>> {
+  const env = authEnv(await ghToken());
+  const out = new Map<string, string>();
+  await Promise.all(s.files.filter((f) => f.status[0] !== 'A').map(async (f) => {
+    try { out.set(join(s.dir, f.path), await git(s.dir, ['show', `${s.baseSha}:${f.oldPath ?? f.path}`], env)); } catch { /* binary or unreadable: no "before" for it */ }
+  }));
+  return out;
 }
 
 // everything we have ever opened: in memory first, then state files on disk
@@ -289,9 +317,22 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const line = Number(url.searchParams.get('line'));
     const col = Number(url.searchParams.get('col'));
     if (!path || !line) return json(res, 400, { error: 'path and line required' });
-    if (!o.lang) { console.error(`> building language service for ${s.owner}/${s.repo}#${s.number}`); o.lang = new Lang(s.dir, o.treePaths); }
-    const locs = url.pathname === '/api/def' ? o.lang.definitions(path, line, col) : o.lang.references(path, line, col);
+    const locs = url.pathname === '/api/def' ? langOf(o).definitions(path, line, col) : langOf(o).references(path, line, col);
     return json(res, 200, { locs });
+  }
+
+  // hover: TypeScript's answers about a name, plus which of the files using it this PR also changes
+  if (req.method === 'GET' && url.pathname === '/api/hover') {
+    const path = url.searchParams.get('path') || '';
+    const line = Number(url.searchParams.get('line'));
+    const col = Number(url.searchParams.get('col'));
+    if (!path || !line) return json(res, 400, { error: 'path and line required' });
+    const lang = langOf(o);
+    lang.setBase(await (o.base ??= baseTexts(s)));
+    const h = lang.hover(path, line, col);
+    if (!h) return json(res, 200, { hover: null });
+    const inPr = new Set(s.files.map((f) => f.path));
+    return json(res, 200, { hover: { ...h, refs: h.refs.length, changed: h.refs.filter((f) => f !== path && inPr.has(f)) } });
   }
 
   // one file's diff: within one commit (`chunk`), or PR-wide against the merge-base (`path`)
