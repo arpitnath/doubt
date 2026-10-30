@@ -71,7 +71,7 @@ async function openPr(url: string, force = false): Promise<Open> {
         title: meta.title, author: meta.author,
         headSha: meta.headSha, baseSha: co.baseSha, baseRef: meta.baseRef,
         dir: co.dir, diffFile, commits: list, chunks, files, readFiles: {}, doubts: prev?.doubts ?? [],
-        hunkMarks: {}, prevHeadSha: prev?.headSha, changedSince, body: meta.body,
+        prevHeadSha: prev?.headSha, changedSince, body: meta.body,
         signals: computeSignals(co.dir, readText(diffFile, 'utf8'), chunks)
       };
       carryOver(state, prev);
@@ -266,20 +266,6 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const rev = url.searchParams.get('rev') === 'base' ? s.baseSha : s.headSha;
     if (!path) return json(res, 400, { error: 'path required' });
     return json(res, 200, { entries: await history(s.dir, rev, path, start, end) });
-  }
-
-  // hunk marks: finer than a file, for big files read across sittings
-  if (req.method === 'POST' && url.pathname === '/api/hunk') {
-    const body = await readJson(req);
-    const key = String(body.key || '');
-    const index = Number(body.index);
-    if (!key || !Number.isInteger(index)) return json(res, 400, { error: 'key and index required' });
-    const marks = (s.hunkMarks ??= {});
-    const set = new Set(marks[key] ?? []);
-    body.read === false ? set.delete(index) : set.add(index);
-    marks[key] = [...set].sort((a, b) => a - b);
-    save(s);
-    return json(res, 200, { ok: true, hunkMarks: marks });
   }
 
   // go to definition / find references, TypeScript and JavaScript only; the service builds on first use

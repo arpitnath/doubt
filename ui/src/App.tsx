@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PatchDiff, File as PierreFile, type DiffLineAnnotation, type FileDiffMetadata, type FileDiffLoadedFiles, type SelectedLineRange } from '@pierre/diffs/react';
-import { definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, resolveDoubt, syncPr, isNoise, outline, parseHunks, readingOrder, references, search, setHunk, setVerdict, type Chunk, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
+import { definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, resolveDoubt, syncPr, isNoise, outline, parseHunks, readingOrder, references, search, setVerdict, type Chunk, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
 import { Tree } from './Tree';
 import { Landing } from './Landing';
 import { Agent, type AgentHandle } from './Agent';
@@ -227,16 +227,6 @@ function Review({ prKey }: { prKey: string }) {
     }
   }, [pr, view, ordered]);
 
-  // [ and ]: jump between stacked file headers inside the scroll pane
-  const jumpStack = useCallback((dir: 1 | -1) => {
-    const pane = diffRef.current;
-    if (!pane) return;
-    const tops = [...pane.querySelectorAll<HTMLElement>('.stack')].map((el) => el.offsetTop - pane.offsetTop);
-    const cur = pane.scrollTop;
-    const next = dir === 1 ? tops.find((t) => t > cur + 4) : [...tops].reverse().find((t) => t < cur - 4);
-    if (next !== undefined) pane.scrollTo({ top: next, behavior: 'smooth' });
-  }, []);
-
   // open any path: a changed file shows its PR diff, anything else shows the file at the PR head
   const openPath = useCallback((path: string, line?: number) => {
     if (line) setJump({ path, line });
@@ -339,8 +329,6 @@ function Review({ prKey }: { prKey: string }) {
     return m;
   }, [items, patches]);
   const flatHunks = useMemo(() => items.flatMap((it) => (hunksOf.get(it.key) ?? []).map((h) => ({ key: it.key, hunk: h }))), [items, hunksOf]);
-  const hunkMarks = pr?.hunkMarks ?? {};
-  const isHunkRead = useCallback((key: string, index: number) => (hunkMarks[key] ?? []).includes(index), [hunkMarks]);
 
   const scrollToHunk = useCallback((key: string, h: Hunk) => {
     const pane = diffRef.current;
@@ -361,21 +349,6 @@ function Review({ prKey }: { prKey: string }) {
     const next = flatHunks[Math.min(Math.max(i + dir, 0), flatHunks.length - 1)];
     if (next) scrollToHunk(next.key, next.hunk);
   }, [flatHunks, cursor, scrollToHunk]);
-
-  // m: toggle the current hunk read; when every hunk of a file is read, the file is read
-  const toggleHunk = useCallback(async () => {
-    const cur = cursor ?? (sel ? { key: sel.key, hunk: (hunksOf.get(sel.key) ?? []).find((h) => Math.min(sel.range.start, sel.range.end) >= h.newStart && Math.max(sel.range.start, sel.range.end) < h.newStart + Math.max(1, h.newCount))?.index ?? -1 } : null);
-    if (!cur || cur.hunk < 0) { setToast('no hunk under the cursor: space to jump to one'); return; }
-    const read = !isHunkRead(cur.key, cur.hunk);
-    const r = await setHunk(prKey, cur.key, cur.hunk, read);
-    setPr((p) => (p ? { ...p, hunkMarks: r.hunkMarks } : p));
-    const all = hunksOf.get(cur.key) ?? [];
-    if (read && all.length && all.every((h) => (r.hunkMarks[cur.key] ?? []).includes(h.index))) {
-      const it = items.find((x) => x.key === cur.key);
-      if (it) await apply(it.oldRev === 'base' ? { path: it.path } : { chunkId: it.key }, 'understood');
-      setToast('every hunk read: file marked read');
-    }
-  }, [cursor, sel, hunksOf, isHunkRead, prKey, items, apply]);
 
   // b: who last touched the selected lines, or the current hunk
   const showHistory = useCallback(async () => {
@@ -448,39 +421,23 @@ function Review({ prKey }: { prKey: string }) {
       if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); void openPalette('search'); return; }
       if (mod && e.shiftKey && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); void openPalette('outline'); return; }
       if (mod || e.altKey) return;
-      if (e.key === 'a') { e.preventDefault(); setAgentOpen((v) => !v); }
-      else if (e.key === 'd') { e.preventDefault(); if (!commentTarget) { setToast('open a file first'); return; } setComment(''); setTimeout(() => commentRef.current?.focus(), 0); }
+      if (e.key === 'd') { e.preventDefault(); if (!commentTarget) { setToast('open a file first'); return; } setComment(''); setTimeout(() => commentRef.current?.focus(), 0); }
       else if (e.key === 'p') { e.preventDefault(); void openPalette('open'); } // preventDefault: the p must not land in the input that autofocuses
       else if (e.key === 'g') { e.preventDefault(); void openPalette('search'); }
       else if (e.key === 'o') { e.preventDefault(); void openPalette('outline'); }
       else if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); stepHunk(e.shiftKey ? -1 : 1); }
-      else if (e.key === 'm') void toggleHunk();
       else if (e.key === 'b') void showHistory();
-      else if (e.key === 'r') void sync();
-      else if (e.key === 'i') { if (pr?.prevHeadSha) setSince((v) => !v); else setToast('no previous head yet: nothing to compare since'); }
       else if (e.key === 'y') void copyRef(false);
       else if (e.key === 'Y') void copyRef(true);
       else if (e.key === 'u') void judge('understood');
-      else if (e.key === 'x') void judge('none');
-      else if (e.key === 'n') void skipNoise();
-      else if (e.key === 'e') setFullFile((v) => !v);
-      else if (e.key === 'w') setSplit((v) => !v);
-      else if (e.key === 's') switchTab(tab === 'files' ? 'commits' : tab === 'commits' ? 'repo' : tab === 'repo' ? 'doubts' : 'files');
-      else if (e.key === 'v') setShowDesc((x) => !x);
       else if (e.key === '?') setShowHelp((x) => !x);
       else if (e.key === 'Escape') setShowHelp(false);
-      else if (e.key === 'c' && tab === 'commits') {
-        if (view?.kind === 'chunk') { const c = pr?.chunks.find((k) => k.id === view.id); if (c) setView({ kind: 'commit', sha: c.sha }); }
-        else if (view?.kind === 'commit') { const c = pr?.chunks.find((k) => k.sha === view.sha); if (c) setView({ kind: 'chunk', id: c.id }); }
-      }
       else if (e.key === 'j') move(1);
       else if (e.key === 'k') move(-1);
-      else if (e.key === ']') jumpStack(1);
-      else if (e.key === '[') jumpStack(-1);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [judge, skipNoise, switchTab, move, jumpStack, openPalette, pickRow, copyRef, sendComment, commentTarget, comment, stepHunk, toggleHunk, showHistory, sync, tab, view, pr, palette, paletteRows, paletteIdx]);
+  }, [judge, move, openPalette, pickRow, copyRef, sendComment, commentTarget, comment, stepHunk, showHistory, palette, paletteRows, paletteIdx]);
 
   // ---- render -------------------------------------------------------------------------------------
   const theme = useMemo(() => ({ dark: 'github-dark' as const, light: 'github-light' as const }), []);
@@ -511,19 +468,12 @@ function Review({ prKey }: { prKey: string }) {
     onTokenClick: (p: { lineNumber: number; lineCharStart: number }, ev: MouseEvent) => tokenClick(path, p.lineNumber, p.lineCharStart, ev)
   }), [theme, themeType, tokenClick]);
 
-  type Ann = { hunk?: number; doubt?: string };
-  const annotationsFor = useCallback((it: Item): DiffLineAnnotation<Ann>[] => {
-    const hunks: DiffLineAnnotation<Ann>[] = (hunksOf.get(it.key) ?? []).filter((h) => isHunkRead(it.key, h.index)).map((h) => (
-      h.newCount > 0 ? { side: 'additions' as const, lineNumber: h.newStart, metadata: { hunk: h.index } } : { side: 'deletions' as const, lineNumber: h.oldStart, metadata: { hunk: h.index } }
-    ));
-    const answers: DiffLineAnnotation<Ann>[] = (pr?.doubts ?? [])
-      .filter((d) => d.path === it.path && d.lines && !d.resolved)
-      .map((d) => ({ side: 'additions' as const, lineNumber: d.lines!.end, metadata: { doubt: d.id } }));
-    return [...hunks, ...answers];
-  }, [hunksOf, isHunkRead, pr?.doubts]);
+  type Ann = { doubt: string };
+  const annotationsFor = useCallback((it: Item): DiffLineAnnotation<Ann>[] => (pr?.doubts ?? [])
+    .filter((d) => d.path === it.path && d.lines && !d.resolved)
+    .map((d) => ({ side: 'additions' as const, lineNumber: d.lines!.end, metadata: { doubt: d.id } })), [pr?.doubts]);
 
   const renderAnn = useCallback((a: DiffLineAnnotation<Ann>) => {
-    if (a.metadata.hunk !== undefined) return <div className="hunk-read">✓ hunk read</div>;
     const d = pr?.doubts.find((x) => x.id === a.metadata.doubt);
     if (!d) return null;
     const open = openAnswers.has(d.id);
@@ -562,8 +512,17 @@ function Review({ prKey }: { prKey: string }) {
         <a className="home" href="#/" title="all pull requests">doubt</a>
         <span className="title">#{pr.number} {pr.title}</span>
         <span className="meta">{pr.owner}/{pr.repo} · {pr.author} · {pr.baseRef} ← {pr.headSha.slice(0, 7)}</span>
+        <span className="progress" title={`${readCount} of ${pr.files.length} files read`}>
+          <span className="pbar"><i style={{ width: `${pr.files.length ? Math.round((readCount / pr.files.length) * 100) : 0}%` }} /></span>
+          <b>{readCount}</b> of {pr.files.length} read
+        </span>
+        <button className={showDesc ? 'on' : ''} onClick={() => setShowDesc((x) => !x)} title="the PR description, above the diff">Description</button>
+        <button onClick={() => void sync()} title="refetch the PR head; files you read stay read unless their content changed">
+          Sync{changedSet.size ? <span className="badge" title={`changed since ${pr.prevHeadSha?.slice(0, 7)}`}>{changedSet.size} changed</span> : null}
+        </button>
+        <button className={agentOpen ? 'on' : ''} onClick={() => setAgentOpen((v) => !v)} title="your Claude Code sessions, as terminals">Agent</button>
+        <button className="cmdk" onClick={() => void openPalette('open')} title="open a file">Open, search, actions… <kbd>⌘K</kbd></button>
         <button className="theme" onClick={() => setUiTheme((t) => THEMES[(THEMES.indexOf(t) + 1) % THEMES.length])} title="switch theme: dark, dim, light">Theme: {uiTheme}</button>
-        <span className="progress"><b>{readCount}</b> / {pr.files.length} files read{noiseLeft ? <> · {noiseLeft} noise, <kbd>n</kbd> skips</> : null}{changedSet.size ? <> · {changedSet.size} changed since {pr.prevHeadSha?.slice(0, 7)}</> : null} · <kbd>r</kbd> sync</span>
       </div>
 
       <div className="queue">
@@ -574,6 +533,9 @@ function Review({ prKey }: { prKey: string }) {
           <button className={tab === 'doubts' ? 'on' : ''} onClick={() => switchTab('doubts')}>Doubts{pr.doubts.filter((d) => d.path && !d.resolved).length ? ` ${pr.doubts.filter((d) => d.path && !d.resolved).length}` : ''}</button>
 
         </div>
+        {tab === 'files' && noiseLeft > 0 && (
+          <div className="treebar"><button onClick={() => void skipNoise()} title="lockfiles, generated files, snapshots and whitespace-only changes">Skip {noiseLeft} noise file{noiseLeft === 1 ? '' : 's'}</button></div>
+        )}
         {tab === 'files' && <Tree paths={pr.files.map((f) => f.path)} meta={fileByPath} readFiles={pr.readFiles} changed={changedSet} signals={pr.signals} current={currentPath} onPick={(p) => openPath(p)} />}
         {tab === 'repo' && (tree.length ? <Tree paths={tree} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={(p) => openPath(p)} repo /> : <div className="empty">loading tree…</div>)}
         {tab === 'doubts' && (
@@ -615,24 +577,50 @@ function Review({ prKey }: { prKey: string }) {
 
       <div className="main" onMouseDown={(e) => { if (!(e.target as HTMLElement).closest('input,textarea')) (e.currentTarget.closest('.app') as HTMLElement | null)?.focus(); }}>
         <div className="bar">
+          {view?.kind !== 'repo' && (
+            <span className="nav">
+              <button onClick={() => move(-1)} title="previous (k)" aria-label="previous">‹</button>
+              <button onClick={() => move(1)} title="next (j)" aria-label="next">›</button>
+            </span>
+          )}
           {view?.kind === 'repo'
             ? <><span className="path">{view.path}</span><span className="meta2">at PR head · not changed by this PR</span></>
             : commit
               ? <><span className="path">{commit.sha.slice(0, 7)} {commit.subject}</span><span className="meta2">{items.length} files · {commit.author}</span></>
               : head
-                ? <><span className="path">{head.path}</span><span className="meta2">{head.oldRev === 'base' ? (since && changedSet.has(head.path) ? `since ${pr.prevHeadSha?.slice(0, 7)}` : 'vs merge-base') : head.newRev.slice(0, 7)} · {head.status} · +{head.adds}/-{head.dels}{head.read ? ' · read' : ''}{changedSet.has(head.path) ? <> · changed since your read, <kbd>i</kbd> {since ? 'whole diff' : 'only what changed'}</> : null}</span></>
+                ? <><span className="path">{head.path}</span><span className="meta2">{head.oldRev === 'base' ? (since && changedSet.has(head.path) ? `since ${pr.prevHeadSha?.slice(0, 7)}` : 'vs merge-base') : head.newRev.slice(0, 7)} · {head.status} · +{head.adds}/-{head.dels}</span></>
                 : <span>nothing left to read</span>}
-          {head && (pr.signals?.[head.path] ?? []).length > 0 && (
-            <span className="sigline">{(pr.signals?.[head.path] ?? []).map((x) => {
-              const note = x.kind === 'owners' ? x.note.split(' ').slice(0, 2).join(' ') + (x.note.split(' ').length > 2 ? ` +${x.note.split(' ').length - 2}` : '') : x.note;
-              return <span key={x.kind} title={x.note}><b>{x.kind}</b> {note} &nbsp;</span>;
-            })}</span>
-          )}
           <span className="keys">
-            {flatHunks.length ? <span className="hunkpos">hunk {cursor ? flatHunks.findIndex((x) => x.key === cursor.key && x.hunk.index === cursor.hunk) + 1 : 0}/{flatHunks.length}</span> : null}
-            <kbd>?</kbd> keys
+            {flatHunks.length ? <span className="hunkpos" title="space / shift+space">change {cursor ? flatHunks.findIndex((x) => x.key === cursor.key && x.hunk.index === cursor.hunk) + 1 : 0}/{flatHunks.length}</span> : null}
+            {head && head.oldRev === 'base' && changedSet.has(head.path) && (
+              <span className="seg" role="group" aria-label="what to show of a file that changed since your read">
+                <button className={since ? '' : 'on'} onClick={() => setSince(false)}>Whole diff</button>
+                <button className={since ? 'on' : ''} onClick={() => setSince(true)} title={`only what changed since ${pr.prevHeadSha?.slice(0, 7)}`}>Since your read</button>
+              </span>
+            )}
+            {view?.kind !== 'repo' && head && (
+              <>
+                <span className="seg" role="group" aria-label="layout">
+                  <button className={split && !fullFile ? '' : 'on'} onClick={() => setSplit(false)}>Unified</button>
+                  <button className={split && !fullFile ? 'on' : ''} onClick={() => { setSplit(true); setFullFile(false); }} title="side by side">Split</button>
+                </span>
+                <span className="seg" role="group" aria-label="scope">
+                  <button className={fullFile ? '' : 'on'} onClick={() => setFullFile(false)}>Changes</button>
+                  <button className={fullFile ? 'on' : ''} onClick={() => setFullFile(true)} title="the whole file with the changes inline">Whole file</button>
+                </span>
+                <button className={`markread ${items.every((i) => i.read) ? 'done' : ''}`} onClick={() => void judge(items.every((i) => i.read) ? 'none' : 'understood')} title={items.every((i) => i.read) ? 'mark unread' : 'mark read and open the next unread (u)'}>
+                  {items.every((i) => i.read) ? '✓ Read' : commit ? 'Mark commit read' : 'Mark read'}
+                </button>
+              </>
+            )}
           </span>
         </div>
+        {head && (pr.signals?.[head.path] ?? []).length > 0 && (
+            <div className="sigline">{(pr.signals?.[head.path] ?? []).map((x) => {
+              const note = x.kind === 'owners' ? x.note.split(' ').slice(0, 2).join(' ') + (x.note.split(' ').length > 2 ? ` +${x.note.split(' ').length - 2}` : '') : x.note;
+              return <span key={x.kind} title={x.note}><b>{x.kind}</b> {note} &nbsp;</span>;
+            })}</div>
+          )}
         {showDesc && (
           <div className="desc">
             {pr.body?.trim()
@@ -706,7 +694,6 @@ function Review({ prKey }: { prKey: string }) {
                 <div><kbd>x</kbd> unmark</div>
                 <div><kbd>n</kbd> mark every noise file read</div>
                 <div><kbd>space</kbd> / <kbd>⇧space</kbd> next / previous hunk</div>
-                <div><kbd>m</kbd> mark the current hunk read</div>
                 <div><kbd>j</kbd> / <kbd>k</kbd> next / previous file or commit</div>
                 <div><kbd>[</kbd> / <kbd>]</kbd> files inside a stacked commit</div>
                 <h4>view</h4>

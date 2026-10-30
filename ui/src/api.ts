@@ -13,7 +13,7 @@ export interface Doubt {
 export interface PrState {
   url: string; owner: string; repo: string; number: number; title: string; author: string;
   headSha: string; baseSha: string; baseRef: string; dir: string;
-  commits: Commit[]; chunks: Chunk[]; files: PrFile[]; readFiles: Record<string, string>; hunkMarks?: Record<string, number[]>;
+  commits: Commit[]; chunks: Chunk[]; files: PrFile[]; readFiles: Record<string, string>;
   prevHeadSha?: string; changedSince?: string[]; signals?: Record<string, Signal[]>; body?: string; doubts: Doubt[];
 }
 export const resolveDoubt = (key: string, id: string, resolved: boolean): Promise<unknown> =>
@@ -96,8 +96,6 @@ export const setVerdict = (key: string, target: VerdictTarget, verdict: Verdict)
 export interface HistoryEntry { sha: string; subject: string; author: string; date: string; pr?: number; lines: number }
 export const historyOf = (key: string, path: string, start: number, end: number): Promise<{ entries: HistoryEntry[] }> =>
   fetch(`/api/history${q(key, `&path=${encodeURIComponent(path)}&start=${start}&end=${end}`)}`).then((r) => ok(r));
-export const setHunk = (key: string, itemKey: string, index: number, read: boolean): Promise<{ ok: boolean; hunkMarks: Record<string, number[]> }> =>
-  fetch(`/api/hunk${q(key)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: itemKey, index, read }) }).then((r) => ok(r));
 
 // hunks of a unified patch: where each starts on the new side (or the old side for pure deletions)
 export interface Hunk { index: number; newStart: number; newCount: number; oldStart: number; oldCount: number }

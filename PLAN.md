@@ -58,7 +58,7 @@ Click the page once after it opens so it has keyboard focus.
 - **Try it:** review three files using **only the mouse**: open, switch Split, switch Whole file, Mark read, ›.
 - **You should see:** every step has a visible control; Mark read moves to the next unread file.
 - **Today:** 28 single-key shortcuts, several with no button.
-- [ ] built · [ ] verified
+- [x] built · [ ] verified
 
 ### 1.3 One ⌘K palette
 - **What changes:** one palette for files and actions, replacing the separate open, search and outline palettes.
