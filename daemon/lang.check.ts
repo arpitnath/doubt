@@ -1,6 +1,7 @@
-// Runnable check for lang.ts project resolution: `npm run check`. Builds a tiny monorepo in a temp
-// dir, where two packages map the same alias to different folders and one maps a package to a
-// `dist/` that was never built, then asserts definitions and references land where an editor would.
+// Runnable check for lang.ts: `npm run check`. Builds a tiny monorepo in a temp dir, where two
+// packages map the same alias to different folders and one maps a package to a `dist/` that was never
+// built, then asserts definitions and references land where an editor would, and that hover names a
+// package whose types are not installed and a signature this PR changed.
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,6 +13,7 @@ const files: Record<string, string> = {
   'packages/app/jsconfig.json': '{ "compilerOptions": { "baseUrl": "./", "paths": { "hooks/*": ["src/hooks/*"] } } }',
   'packages/app/src/hooks/useThing/index.js': 'export default function useThing(a) { return a; }\n',
   'packages/app/src/components/Panel.js': "import useThing from 'hooks/useThing';\nuseThing(1);\n",
+  'packages/app/src/view.js': "import { useState } from 'react';\nexport function show(a, b) { return useState(a + b); }\n",
   'packages/web/package.json': '{ "name": "@demo/web" }',
   'packages/web/tsconfig.json': '{ "compilerOptions": { "baseUrl": "./", "paths": { "hooks/*": ["lib/hooks/*"], "@demo/types": ["../types/dist/index.d.ts"] } }, "include": ["lib/**/*.ts"] }',
   'packages/web/lib/hooks/useThing/index.ts': 'export default function useThing(): string { return ""; }\n',
@@ -36,6 +38,13 @@ try {
   assert.deepEqual(where(lang.definitions('packages/web/lib/page.ts', 1, at('packages/web/lib/page.ts', 1, 'useThing'))), ['packages/web/lib/hooks/useThing/index.ts:1']);
   // a mapping to an unbuilt dist/ falls back to the package's source
   assert.deepEqual(where(lang.definitions('packages/web/lib/page.ts', 3, at('packages/web/lib/page.ts', 3, 'Shape'))), ['packages/types/src/index.ts:1']);
+  // hover: a package that does not resolve here is named as one; a signature changed since the base shows both
+  lang.setBase(new Map([[join(dir, 'packages/app/src/view.js'), "import { useState } from 'react';\nexport function show(a) { return useState(a); }\n"]]));
+  assert.equal(lang.hover('packages/app/src/view.js', 2, at('packages/app/src/view.js', 2, 'useState'))?.lib, 'react');
+  const show = lang.hover('packages/app/src/view.js', 2, at('packages/app/src/view.js', 2, 'show'));
+  assert.match(show?.sig ?? '', /show\(a: any, b: any\)/);
+  assert.match(show?.before ?? '', /show\(a: any\)/);
+  assert.equal(lang.hover('packages/app/src/hooks/useThing/index.js', 1, at('packages/app/src/hooks/useThing/index.js', 1, 'useThing'))?.before, undefined); // unchanged: no "before"
   console.log('lang: ok');
 } finally {
   rmSync(dir, { recursive: true, force: true });

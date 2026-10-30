@@ -8,6 +8,17 @@ import { join, dirname, relative, resolve } from 'node:path';
 
 export interface Loc { path: string; line: number; col: number; text?: string }
 
+// What a reviewer sees hovering a name: TypeScript's own answers, nothing inferred.
+export interface Hover {
+  sig: string;
+  doc: string;
+  def?: Loc; // where it is declared, inside the checkout
+  builtIn: boolean; // declared by JavaScript or the browser (TypeScript's lib files)
+  lib?: string; // imported from a package that does not resolve in the checkout: its types are not installed
+  refs: string[]; // files that use it
+  before?: string; // its signature at the PR's base, when this PR changed it
+}
+
 const SCRIPT = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 const SKIP = /(^|\/)(node_modules|dist|build|coverage|\.next|out)\//;
 const CONFIG = /(^|\/)(tsconfig|jsconfig)\.json$/;
@@ -26,7 +37,7 @@ const DEFAULTS: ts.CompilerOptions = {
   resolveJsonModule: true
 };
 
-interface Project { service: ts.LanguageService; files: Set<string> }
+interface Project { service: ts.LanguageService; files: Set<string>; config: string; options: ts.CompilerOptions }
 
 export class Lang {
   private texts = new Map<string, string>(); // the checkout never changes under a Lang; read each file once
@@ -35,6 +46,7 @@ export class Lang {
   private configs: Set<string>;
   private names: string[];
   private workspace: Record<string, string[]>;
+  private base: Map<string, string> | null = null; // absolute path -> text at the PR base, for files this PR changes
 
   constructor(private dir: string, treePaths: string[]) {
     this.names = treePaths.filter((p) => SCRIPT.test(p) && !SKIP.test(p)).map((p) => join(dir, p));
@@ -66,8 +78,21 @@ export class Lang {
     return this.project('');
   }
 
-  private project(config: string): Project {
-    const have = this.projects.get(config);
+  // build the project a file belongs to now (and its base twin, once the base texts are set), so the
+  // first hover or jump in it is not the slow one
+  warm(path: string, atBase = false): void {
+    const p = this.projectFor(path);
+    (atBase ? this.project(p.config, true) : p).service.getProgram();
+  }
+
+  // the PR base's version of the files this PR changes, for signatures before and after
+  setBase(texts: Map<string, string>): void {
+    this.base = texts;
+  }
+
+  private project(config: string, atBase = false): Project {
+    const key = atBase ? `${config}@base` : config;
+    const have = this.projects.get(key);
     if (have) return have;
     let options: ts.CompilerOptions = { ...DEFAULTS, baseUrl: this.dir, paths: this.workspace };
     let names = this.names;
@@ -75,8 +100,8 @@ export class Lang {
       const abs = join(this.dir, config);
       const { config: json, error } = ts.readConfigFile(abs, (f) => this.read(f));
       if (error) { // unreadable config: its files get the default project, once
-        const fallback = this.project('');
-        this.projects.set(config, fallback);
+        const fallback = this.project('', atBase);
+        this.projects.set(key, fallback);
         return fallback;
       }
       // allowJs so a tsconfig's include picks up .js; jsconfig.json already implies it
@@ -89,21 +114,24 @@ export class Lang {
       options = { ...DEFAULTS, ...parsed.options, noEmit: true, paths };
       names = parsed.fileNames.filter((f) => SCRIPT.test(f) && !SKIP.test(f));
     }
+    // at the base, files this PR changes read as they were; everything else is the same at both revisions
+    const read = atBase && this.base ? (f: string) => this.base!.get(f) ?? this.read(f) : (f: string) => this.read(f);
     const host: ts.LanguageServiceHost = {
       getScriptFileNames: () => names,
       getScriptVersion: () => '1',
-      getScriptSnapshot: (f) => { const t = this.read(f); return t === undefined ? undefined : ts.ScriptSnapshot.fromString(t); },
+      getScriptSnapshot: (f) => { const t = read(f); return t === undefined ? undefined : ts.ScriptSnapshot.fromString(t); },
       getCurrentDirectory: () => this.dir,
       getCompilationSettings: () => options,
       getDefaultLibFileName: (o) => ts.getDefaultLibFilePath(o),
       fileExists: (f) => existsSync(f),
-      readFile: (f) => this.read(f),
+      readFile: (f) => read(f),
       readDirectory: ts.sys.readDirectory,
       directoryExists: ts.sys.directoryExists,
       getDirectories: ts.sys.getDirectories
     };
-    const p = { service: ts.createLanguageService(host, this.registry), files: new Set(names) };
-    this.projects.set(config, p);
+    // the base twin gets its own registry: the same file name holds different text at the two revisions
+    const p = { service: ts.createLanguageService(host, atBase ? ts.createDocumentRegistry() : this.registry), files: new Set(names), config, options };
+    this.projects.set(key, p);
     return p;
   }
 
@@ -134,6 +162,52 @@ export class Lang {
     return dedupe(defs.map((d) => this.toLoc(service, d.fileName, d.textSpan)));
   }
 
+  hover(path: string, line: number, col: number): Hover | null {
+    const project = this.projectFor(path);
+    const { service } = project;
+    const at = this.offset(service, path, line, col);
+    if (!at) return null;
+    const qi = service.getQuickInfoAtPosition(at.file, at.pos);
+    if (!qi) return null; // a keyword, a string, a comment
+    const sig = ts.displayPartsToString(qi.displayParts);
+    const name = service.getProgram()?.getSourceFile(at.file)?.text.slice(qi.textSpan.start, qi.textSpan.start + qi.textSpan.length) ?? '';
+    const d0 = (service.getDefinitionAtPosition(at.file, at.pos) ?? [])[0];
+    const builtIn = !!d0 && /\/node_modules\/(typescript|ts5)\/lib\//.test(d0.fileName);
+    const def = d0 && !builtIn ? this.toLoc(service, d0.fileName, d0.textSpan) ?? undefined : undefined;
+    const refs = builtIn ? [] : [...new Set((service.getReferencesAtPosition(at.file, at.pos) ?? []).map((r) => relative(this.dir, resolve(r.fileName))).filter((f) => !f.startsWith('..')))];
+    const lib = d0 && !builtIn ? this.library(project, d0) : undefined;
+    const before = def && def.path === path ? this.signatureAtBase(project, at.file, name, sig) : undefined;
+    return { sig, doc: ts.displayPartsToString(qi.documentation), def, builtIn, lib, refs, before };
+  }
+
+  // A name bound by `import ... from 'x'` or `require('x')`, where x does not resolve to a file in the
+  // checkout: a package whose types are not installed here.
+  private library(project: Project, def: ts.DefinitionInfo): string | undefined {
+    const sf = project.service.getProgram()?.getSourceFile(def.fileName);
+    if (!sf) return undefined;
+    let spec: string | undefined;
+    for (let n: ts.Node | undefined = nodeAt(sf, def.textSpan.start); n && !spec; n = n.parent) {
+      if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier)) spec = n.moduleSpecifier.text;
+      else if (ts.isVariableDeclaration(n) && n.initializer && ts.isCallExpression(n.initializer) && ts.isIdentifier(n.initializer.expression)
+        && n.initializer.expression.text === 'require' && n.initializer.arguments[0] && ts.isStringLiteral(n.initializer.arguments[0])) spec = n.initializer.arguments[0].text;
+    }
+    if (!spec || spec.startsWith('.')) return undefined;
+    const resolved = ts.resolveModuleName(spec, def.fileName, project.options, ts.sys).resolvedModule;
+    return !resolved || resolved.isExternalLibraryImport ? spec : undefined;
+  }
+
+  // The same declaration in the base version of the file, found in its syntax tree; its signature
+  // when it differs from the head's.
+  private signatureAtBase(project: Project, file: string, name: string, headSig: string): string | undefined {
+    if (!this.base?.has(file) || !name) return undefined;
+    const baseProject = this.project(project.config, true);
+    const sf = baseProject.service.getProgram()?.getSourceFile(file);
+    const decl = sf && declarationNamed(sf, name);
+    if (!decl) return undefined; // new in this PR
+    const sig = ts.displayPartsToString(baseProject.service.getQuickInfoAtPosition(file, decl.getStart(sf))?.displayParts);
+    return sig && sig.replace(/\s+/g, ' ') !== headSig.replace(/\s+/g, ' ') ? sig : undefined;
+  }
+
   references(path: string, line: number, col: number): Loc[] {
     const { service } = this.projectFor(path);
     const at = this.offset(service, path, line, col);
@@ -141,6 +215,23 @@ export class Lang {
     const refs = service.getReferencesAtPosition(at.file, at.pos) ?? [];
     return dedupe(refs.map((r) => this.toLoc(service, r.fileName, r.textSpan)));
   }
+}
+
+// the innermost node spanning a position
+function nodeAt(sf: ts.SourceFile, pos: number): ts.Node | undefined {
+  const inside = (n: ts.Node): ts.Node | undefined => ts.forEachChild(n, (c) => (c.getStart(sf) <= pos && pos < c.getEnd() ? inside(c) ?? c : undefined));
+  return inside(sf);
+}
+
+// the first declaration (function, variable, class, method, parameter, property, type) with this name
+function declarationNamed(sf: ts.SourceFile, name: string): ts.Identifier | undefined {
+  const visit = (n: ts.Node): ts.Identifier | undefined => {
+    const id = (n as ts.Node & { name?: ts.Node }).name;
+    if (id && ts.isIdentifier(id) && id.text === name && (ts.isFunctionDeclaration(n) || ts.isVariableDeclaration(n) || ts.isClassDeclaration(n)
+      || ts.isMethodDeclaration(n) || ts.isParameter(n) || ts.isPropertyDeclaration(n) || ts.isInterfaceDeclaration(n) || ts.isTypeAliasDeclaration(n))) return id;
+    return ts.forEachChild(n, visit);
+  };
+  return visit(sf);
 }
 
 function dedupe(locs: Array<Loc | null>): Loc[] {

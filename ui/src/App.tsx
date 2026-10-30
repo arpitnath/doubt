@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PatchDiff, File as PierreFile, type DiffLineAnnotation, type FileDiffMetadata, type FileDiffLoadedFiles, type SelectedLineRange } from '@pierre/diffs/react';
-import { definitions, fuzzy, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, resolveDoubt, syncPr, isNoise, outline, parseHunks, readingOrder, references, search, setHunk, setVerdict, type Chunk, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
+import { agentSessions, definitions, fuzzy, hoverAt, getChunkDiff, getFileAt, getFileDiff, getPr, getTree, historyOf, resolveDoubt, syncPr, isNoise, outline, parseHunks, readingOrder, references, search, setVerdict, type AgentSession, type Chunk, type Doubt, type HoverInfo, type Hunk, type Loc, type PrFile, type PrState, type VerdictTarget } from './api';
 import { Tree } from './Tree';
 import { Landing } from './Landing';
 import { Agent, type AgentHandle } from './Agent';
 import { marked } from 'marked';
+import { THEMES, applyTheme, readTheme, type Theme } from './theme';
+import { Palette, type PaletteMode, type PaletteState, type Row } from './Palette';
+import { HoverCard } from './HoverCard';
+import { SendTo, toTarget } from './SendTo';
 
 // hash routing, nothing more: #/ is the landing page, #/pr/<key> is a review
 function useHash(): string {
@@ -25,10 +29,21 @@ export function App() {
 }
 
 type Tab = 'files' | 'commits' | 'repo' | 'doubts';
+interface Token { lineNumber: number; lineCharStart: number; tokenText: string; tokenElement: HTMLElement }
+
+// The name under the pointer inside a highlighted token. The highlighter merges same-colored text
+// into one token ("{ useState, useEffect }"); code is monospaced, so x gives the character.
+function nameUnder(p: Token, clientX: number): { name: string; col: number; x: number; y: number } | null {
+  const r = p.tokenElement.getBoundingClientRect();
+  const w = r.width / Math.max(1, p.tokenText.length);
+  const i = Math.floor((clientX - r.left) / w);
+  for (const m of p.tokenText.matchAll(/[A-Za-z_$][\w$]*/g)) {
+    if (i >= m.index! && i < m.index! + m[0].length) return { name: m[0], col: p.lineCharStart + m.index!, x: r.left + m.index! * w, y: r.bottom + 6 };
+  }
+  return null;
+}
 type View = { kind: 'file'; path: string } | { kind: 'commit'; sha: string } | { kind: 'chunk'; id: string } | { kind: 'repo'; path: string };
 interface Item { key: string; path: string; oldPath?: string; oldRev: string; newRev: string; read: boolean; status: string; adds: number; dels: number }
-type PaletteMode = 'open' | 'search' | 'outline' | 'locs' | 'history';
-interface Row { label: string; sub?: string; kind?: string; line?: number; path: string }
 
 function Review({ prKey }: { prKey: string }) {
   const [pr, setPr] = useState<PrState | null>(null);
@@ -42,14 +57,22 @@ function Review({ prKey }: { prKey: string }) {
   const [jump, setJump] = useState<{ path: string; line: number } | null>(null); // land here once rendered
   const [sel, setSel] = useState<{ key: string; range: SelectedLineRange } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [palette, setPalette] = useState<{ mode: PaletteMode; query: string; rows: Row[]; title?: string } | null>(null);
+  const [palette, setPalette] = useState<PaletteState | null>(null);
   const [agentOpen, setAgentOpen] = useState(false);
   const [comment, setComment] = useState<string | null>(null); // the review comment being written, null when closed
   const [cursor, setCursor] = useState<{ key: string; hunk: number } | null>(null); // the hunk last jumped to
   const [since, setSince] = useState(false); // interdiff: only what changed since the previous head
   const [showDesc, setShowDesc] = useState(false);
-  const [showHelp, setShowHelp] = useState(false);
+  const [uiTheme, setUiTheme] = useState<Theme>(readTheme);
+  useEffect(() => applyTheme(uiTheme), [uiTheme]);
   const [openAnswers, setOpenAnswers] = useState<Set<string>>(new Set()); // doubt ids whose inline answer is expanded
+  const [sendTo, setSendTo] = useState('new'); // 'term:<id>' | 'session:<id>' | 'new'
+  const [sendSessions, setSendSessions] = useState<AgentSession[]>([]);
+  const [seen, setSeen] = useState<Set<string> | null>(null); // answers already looked at; null until loaded
+  const [hover, setHover] = useState<{ name: string; x: number; y: number; info: HoverInfo | null } | null>(null);
+  const hoverCache = useRef(new Map<string, HoverInfo | null>());
+  const hoverTimer = useRef<number | undefined>(undefined);
+  const [picked, setPicked] = useState<{ key: string; path: string; line: number; col: number; text: string } | null>(null); // the name last clicked in the code
   const changedSet = useMemo(() => new Set(pr?.changedSince ?? []), [pr?.changedSince]);
   const agentRef = useRef<AgentHandle>(null);
   const commentRef = useRef<HTMLTextAreaElement>(null);
@@ -224,16 +247,6 @@ function Review({ prKey }: { prKey: string }) {
     }
   }, [pr, view, ordered]);
 
-  // [ and ]: jump between stacked file headers inside the scroll pane
-  const jumpStack = useCallback((dir: 1 | -1) => {
-    const pane = diffRef.current;
-    if (!pane) return;
-    const tops = [...pane.querySelectorAll<HTMLElement>('.stack')].map((el) => el.offsetTop - pane.offsetTop);
-    const cur = pane.scrollTop;
-    const next = dir === 1 ? tops.find((t) => t > cur + 4) : [...tops].reverse().find((t) => t < cur - 4);
-    if (next !== undefined) pane.scrollTo({ top: next, behavior: 'smooth' });
-  }, []);
-
   // open any path: a changed file shows its PR diff, anything else shows the file at the PR head
   const openPath = useCallback((path: string, line?: number) => {
     if (line) setJump({ path, line });
@@ -268,15 +281,48 @@ function Review({ prKey }: { prKey: string }) {
     setPalette({ mode, query: '', rows: [] });
   }, [focus, textOf]);
 
-  const paletteRows = useMemo((): Row[] => {
-    if (!palette) return [];
-    if (palette.mode === 'open') return fuzzy(palette.query, tree).map((p) => ({ label: p.slice(p.lastIndexOf('/') + 1), sub: p.slice(0, Math.max(0, p.lastIndexOf('/'))), path: p }));
-    if (palette.mode === 'outline') {
-      const qq = palette.query.toLowerCase();
-      return palette.rows.filter((r) => !qq || r.label.toLowerCase().includes(qq));
-    }
-    return palette.rows;
-  }, [palette, tree]);
+  // every action the screen offers, for ⌘K; buttons stay the primary way, this is the fast one
+  const actions = (): Row[] => {
+    if (!pr) return [];
+    const shownRead = items.length > 0 && items.every((i) => i.read);
+    const noise = pr.files.filter((f) => isNoise(f) && !isRead(f.path)).length;
+    const list: Array<Row | false> = [
+      view?.kind !== 'repo' && items.length > 0 && { label: shownRead ? 'Mark unread' : 'Mark read, open the next unread', terms: 'mark read unread understood', hint: 'u', run: () => void judge(shownRead ? 'none' : 'understood') },
+      { label: 'Next file', hint: 'j', run: () => move(1) },
+      { label: 'Previous file', hint: 'k', run: () => move(-1) },
+      { label: split && !fullFile ? 'Show unified' : 'Show split', terms: 'layout split unified side by side', run: () => { setSplit(!(split && !fullFile)); setFullFile(false); } },
+      { label: fullFile ? 'Show the changes only' : 'Show the whole file', terms: 'scope whole file changes only', run: () => setFullFile((v) => !v) },
+      { label: 'Search the repo for text…', run: () => { setPaletteIdx(0); setPalette({ mode: 'search', query: '', rows: [] }); } },
+      { label: 'Outline of this file…', run: () => void openPalette('outline') },
+      { label: showDesc ? 'Hide the PR description' : 'Show the PR description', terms: 'description body', run: () => setShowDesc((x) => !x) },
+      { label: 'Sync with GitHub', run: () => void sync() },
+      { label: agentOpen ? 'Hide the agent panel' : 'Show the agent panel', terms: 'agent claude session terminal', run: () => setAgentOpen((v) => !v) },
+      noise > 0 && { label: `Skip ${noise} noise file${noise === 1 ? '' : 's'}`, run: () => void skipNoise() },
+      { label: 'Go to Changes', run: () => switchTab('files') },
+      { label: 'Go to Commits', run: () => switchTab('commits') },
+      { label: 'Go to Repo', run: () => switchTab('repo') },
+      { label: 'Go to Doubts', run: () => switchTab('doubts') },
+      { label: `Theme: switch to ${THEMES[(THEMES.indexOf(uiTheme) + 1) % THEMES.length]}`, terms: 'theme dark dim light', run: () => setUiTheme((t) => THEMES[(THEMES.indexOf(t) + 1) % THEMES.length]) },
+      { label: 'All pull requests', run: () => { window.location.hash = '#/'; } }
+    ];
+    return list.filter((r): r is Row => !!r).map((r) => ({ ...r, kind: 'action' }));
+  };
+
+  let paletteRows: Row[] = [];
+  if (palette?.mode === 'all') {
+    const qq = palette.query.trim().toLowerCase();
+    const acts = actions().filter((a) => !qq || `${a.label} ${a.terms ?? ''}`.toLowerCase().includes(qq));
+    // files this PR changes come first: in a review they are what you are looking for
+    const matches = fuzzy(palette.query, tree, 60);
+    const ranked = [...matches.filter((p) => fileByPath.has(p)), ...matches.filter((p) => !fileByPath.has(p))].slice(0, 20);
+    const files: Row[] = ranked.map((p) => ({ kind: fileByPath.get(p)?.status ?? 'file', label: p.slice(p.lastIndexOf('/') + 1), sub: p.slice(0, Math.max(0, p.lastIndexOf('/'))), path: p }));
+    paletteRows = qq ? [...acts.slice(0, 5), ...files] : acts;
+  } else if (palette?.mode === 'outline') {
+    const qq = palette.query.toLowerCase();
+    paletteRows = palette.rows.filter((r) => !qq || r.label.toLowerCase().includes(qq));
+  } else if (palette) {
+    paletteRows = palette.rows;
+  }
 
   // search as you type, debounced, newest query wins
   useEffect(() => {
@@ -291,7 +337,8 @@ function Review({ prKey }: { prKey: string }) {
 
   const pickRow = useCallback((r: Row) => {
     setPalette(null);
-    if (r.line !== undefined || palette?.mode === 'open') openPath(r.path, r.line);
+    if (r.run) r.run();
+    else if (r.path && (r.line !== undefined || palette?.mode === 'all')) openPath(r.path, r.line);
   }, [openPath, palette?.mode]);
 
   // ---- code intelligence: cmd-click a token for its definition, shift-cmd-click for references --
@@ -302,15 +349,55 @@ function Review({ prKey }: { prKey: string }) {
     setPalette({ mode: 'locs', query: '', title, rows: locs.map((l) => ({ label: l.text || '', sub: l.path, line: l.line, path: l.path })) });
   }, [openPath]);
 
-  const tokenClick = useCallback((path: string, line: number, col: number, ev: MouseEvent) => {
-    if (!(ev.metaKey || ev.ctrlKey)) return;
-    ev.preventDefault();
-    const wantRefs = ev.altKey; // not shift: shift+click is pierre's range selection
+  const lookup = useCallback((path: string, line: number, col: number, wantRefs: boolean) => {
     setToast(wantRefs ? 'finding references…' : 'finding definition…');
     (wantRefs ? references(prKey, path, line, col) : definitions(prKey, path, line, col))
       .then((r) => { setToast(null); showLocs(wantRefs ? 'references' : 'definition', r.locs); })
       .catch((err) => setToast(err instanceof Error ? err.message : String(err)));
   }, [prKey, showLocs]);
+
+  // hover a name: after a short pause, TypeScript's answers about it, cached per head and position;
+  // the name is found under the pointer, inside a merged token too
+  const hoverAtPointer = useRef<{ el: HTMLElement; move: (e: MouseEvent) => void; shown: string } | null>(null);
+  const prHead = pr?.headSha ?? '';
+  const tokenEnter = useCallback((path: string, p: Token, ev?: PointerEvent) => {
+    if (hoverAtPointer.current) hoverAtPointer.current.el.removeEventListener('mousemove', hoverAtPointer.current.move);
+    const show = (clientX: number) => {
+      const hit = nameUnder(p, clientX);
+      const k = hit ? `${prHead}:${path}:${p.lineNumber}:${hit.col}` : ''; // answers belong to one head
+      if (hoverAtPointer.current && hoverAtPointer.current.shown === k) return;
+      if (hoverAtPointer.current) hoverAtPointer.current.shown = k;
+      window.clearTimeout(hoverTimer.current);
+      if (!hit) { hoverTimer.current = window.setTimeout(() => setHover(null), 200); return; }
+      hoverTimer.current = window.setTimeout(() => {
+        const at = { name: hit.name, x: hit.x, y: hit.y };
+        if (hoverCache.current.has(k)) { const info = hoverCache.current.get(k)!; setHover(info ? { ...at, info } : null); return; }
+        setHover({ ...at, info: null });
+        hoverAt(prKey, path, p.lineNumber, hit.col).then((res) => {
+          hoverCache.current.set(k, res.hover);
+          setHover((h) => (h && h.name === at.name && h.x === at.x && h.y === at.y ? (res.hover ? { ...at, info: res.hover } : null) : h));
+        }).catch(() => setHover(null));
+      }, 300);
+    };
+    const move = (e: MouseEvent) => show(e.clientX);
+    p.tokenElement.addEventListener('mousemove', move);
+    hoverAtPointer.current = { el: p.tokenElement, move, shown: '' };
+    if (ev) show(ev.clientX);
+  }, [prKey, prHead]);
+  const tokenLeave = useCallback(() => {
+    if (hoverAtPointer.current) { hoverAtPointer.current.el.removeEventListener('mousemove', hoverAtPointer.current.move); hoverAtPointer.current = null; }
+    window.clearTimeout(hoverTimer.current);
+    hoverTimer.current = window.setTimeout(() => setHover(null), 200); // time to move onto the card
+  }, []);
+
+  // a plain click on a name remembers it for the line bar; ⌘-click goes to its definition, ⌘⌥-click lists its references
+  const tokenClick = useCallback((key: string, path: string, p: Token, ev: MouseEvent) => {
+    const hit = nameUnder(p, ev.clientX);
+    if (!hit) return;
+    if (!(ev.metaKey || ev.ctrlKey)) { setPicked({ key, path, line: p.lineNumber, col: hit.col, text: hit.name }); return; }
+    ev.preventDefault();
+    lookup(path, p.lineNumber, hit.col, ev.altKey); // not shift: shift+click is pierre's range selection
+  }, [lookup]);
 
   // ---- copy reference / copy with context (px0's Alt+C / Alt+A) ----------------------------------
   const copyRef = useCallback(async (withContext: boolean) => {
@@ -325,8 +412,12 @@ function Review({ prKey }: { prKey: string }) {
       const b = range ? Math.min(lines.length, range.end + 3) : Math.min(lines.length, 60);
       text = `\`\`\`\n// ${ref}\n${lines.slice(a - 1, b).join('\n')}\n\`\`\``;
     }
-    await navigator.clipboard.writeText(text);
-    setToast(`copied ${withContext ? 'with context' : ref}`);
+    try {
+      await navigator.clipboard.writeText(text);
+      setToast(`copied ${withContext ? 'with context' : ref}`);
+    } catch {
+      setToast(`the browser blocked the clipboard: ${ref}`); // say so, and show the ref so it can be copied by hand
+    }
   }, [focus, sel, textOf]);
 
   // hunks per shown item, from the patch text, so navigation and marks never depend on pierre's DOM
@@ -336,8 +427,6 @@ function Review({ prKey }: { prKey: string }) {
     return m;
   }, [items, patches]);
   const flatHunks = useMemo(() => items.flatMap((it) => (hunksOf.get(it.key) ?? []).map((h) => ({ key: it.key, hunk: h }))), [items, hunksOf]);
-  const hunkMarks = pr?.hunkMarks ?? {};
-  const isHunkRead = useCallback((key: string, index: number) => (hunkMarks[key] ?? []).includes(index), [hunkMarks]);
 
   const scrollToHunk = useCallback((key: string, h: Hunk) => {
     const pane = diffRef.current;
@@ -359,21 +448,6 @@ function Review({ prKey }: { prKey: string }) {
     if (next) scrollToHunk(next.key, next.hunk);
   }, [flatHunks, cursor, scrollToHunk]);
 
-  // m: toggle the current hunk read; when every hunk of a file is read, the file is read
-  const toggleHunk = useCallback(async () => {
-    const cur = cursor ?? (sel ? { key: sel.key, hunk: (hunksOf.get(sel.key) ?? []).find((h) => Math.min(sel.range.start, sel.range.end) >= h.newStart && Math.max(sel.range.start, sel.range.end) < h.newStart + Math.max(1, h.newCount))?.index ?? -1 } : null);
-    if (!cur || cur.hunk < 0) { setToast('no hunk under the cursor: space to jump to one'); return; }
-    const read = !isHunkRead(cur.key, cur.hunk);
-    const r = await setHunk(prKey, cur.key, cur.hunk, read);
-    setPr((p) => (p ? { ...p, hunkMarks: r.hunkMarks } : p));
-    const all = hunksOf.get(cur.key) ?? [];
-    if (read && all.length && all.every((h) => (r.hunkMarks[cur.key] ?? []).includes(h.index))) {
-      const it = items.find((x) => x.key === cur.key);
-      if (it) await apply(it.oldRev === 'base' ? { path: it.path } : { chunkId: it.key }, 'understood');
-      setToast('every hunk read: file marked read');
-    }
-  }, [cursor, sel, hunksOf, isHunkRead, prKey, items, apply]);
-
   // b: who last touched the selected lines, or the current hunk
   const showHistory = useCallback(async () => {
     if (!focus) { setToast('open a file first'); return; }
@@ -393,17 +467,99 @@ function Review({ prKey }: { prKey: string }) {
   }, [focus, sel]);
 
   const sendComment = useCallback(async () => {
-    if (!pr || !commentTarget || !comment?.trim()) return;
-    if (!agentRef.current?.activeTitle()) { setToast('open a session first (a)'); return; }
+    if (!pr || !commentTarget || !comment?.trim() || !agentRef.current) return;
     const { path, rev, range } = commentTarget;
     const body = await textOf(rev, path);
     const snippet = range ? body.split('\n').slice(range.start - 1, range.end).join('\n') : undefined;
-    const ok = await agentRef.current.send(prKey, { path, lines: range ?? undefined, question: comment.trim(), snippet });
-    setToast(ok ? `sent to ${agentRef.current.activeTitle()}` : 'no active terminal');
+    const target = toTarget(sendTo, sendSessions);
+    if (!target) { setToast('that session is no longer there: pick another'); return; }
+    setAgentOpen(true);
+    const termId = await agentRef.current.deliver(target, prKey, { path, lines: range ?? undefined, question: comment.trim(), snippet });
+    if (!termId) { setToast('could not reach that session'); return; }
+    const next = target.kind === 'new' ? `term:${termId}` : sendTo; // a new session is the default from now on
+    setSendTo(next);
+    try { localStorage.setItem(`doubt.sendto.${prKey}`, next); } catch { /* storage blocked: default next time */ }
+    setToast(target.kind === 'new' ? 'starting a session in the PR checkout; the doubt goes in once it is ready' : 'sent');
     setComment(null);
     const fresh = await getPr(prKey);
     setPr((p) => (p ? { ...p, doubts: fresh.doubts } : p));
-  }, [pr, prKey, commentTarget, comment, textOf]);
+  }, [pr, prKey, commentTarget, comment, textOf, sendTo, sendSessions]);
+
+  // Ask a doubt: the sessions to choose from, grouped by what they see, and last time's choice if it still exists
+  const startDoubt = useCallback(async () => {
+    setComment('');
+    setTimeout(() => commentRef.current?.focus(), 0);
+    const { sessions } = await agentSessions(prKey).catch(() => ({ sessions: [] as AgentSession[] }));
+    const mine = sessions.filter((x) => x.group && x.group !== 'other');
+    setSendSessions(mine);
+    const terms = agentRef.current?.terms().filter((t) => t.alive) ?? [];
+    let remembered: string | null = null;
+    try { remembered = localStorage.getItem(`doubt.sendto.${prKey}`); } catch { /* storage blocked */ }
+    const exists = (v: string | null) => !!v && (v === 'new' || (v.startsWith('term:') && terms.some((t) => `term:${t.id}` === v)) || (v.startsWith('session:') && mine.some((x) => `session:${x.sessionId}` === v && !x.missing)));
+    const newestHere = mine.find((x) => x.group === 'this-pr' && !x.missing);
+    setSendTo(exists(remembered) ? remembered! : newestHere ? `session:${newestHere.sessionId}` : 'new');
+  }, [prKey]);
+
+  // answers seen: loaded per PR; the first time, every answer already there counts as seen
+  useEffect(() => {
+    if (!pr || seen) return;
+    let ids: string[] | null = null;
+    try { ids = JSON.parse(localStorage.getItem(`doubt.seen.${prKey}`) ?? 'null'); } catch { /* storage blocked */ }
+    setSeen(new Set(ids ?? pr.doubts.filter((d) => d.answer).map((d) => d.id)));
+  }, [pr, seen, prKey]);
+  useEffect(() => { if (seen) try { localStorage.setItem(`doubt.seen.${prKey}`, JSON.stringify([...seen])); } catch { /* storage blocked */ } }, [seen, prKey]);
+  // an answer that lands on the file being read counts as seen; elsewhere it waits in the tray
+  const shownPaths = items.map((i) => i.path).join('|');
+  useEffect(() => {
+    if (!pr || !seen) return;
+    const fresh = pr.doubts.filter((d) => d.answer && !seen.has(d.id) && d.path && shownPaths.split('|').includes(d.path));
+    if (fresh.length) setSeen((s) => new Set([...(s ?? []), ...fresh.map((d) => d.id)]));
+  }, [pr, seen, shownPaths]);
+  const unseen = (pr?.doubts ?? []).filter((d) => d.path && d.answer && seen && !seen.has(d.id)).length;
+
+  const pickDoubt = useCallback((d: Doubt) => {
+    if (d.path) openPath(d.path, d.lines?.start);
+    setOpenAnswers((s) => new Set(s).add(d.id));
+    setSeen((s) => new Set([...(s ?? []), d.id]));
+  }, [openPath]);
+
+  // the line bar: what can be done with the selected lines, said in words; the doubt box opens in its place
+  function lineBar() {
+    if (!commentTarget?.range) return null;
+    const { path, range } = commentTarget;
+    const where = range.start === range.end ? `${path}:${range.start}` : `${path}:${range.start}-${range.end}`;
+    if (comment !== null) {
+      return (
+        <div className="linebar composer" onClick={(e) => e.stopPropagation()}>
+          <label>Your doubt on <code>{where}</code>. The file, lines and code go with it.
+            <textarea ref={commentRef} autoFocus rows={3} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="What don't you get about these lines?" />
+          </label>
+          <SendTo value={sendTo} onChange={setSendTo} sessions={sendSessions} terms={agentRef.current?.terms().filter((t) => t.alive) ?? []} />
+          <div className="row">
+            <span className="to"><kbd>⌘</kbd><kbd>enter</kbd> sends · <kbd>esc</kbd> cancels</span>
+            <button onClick={() => setComment(null)}>Cancel</button>
+            <button className="primary" onClick={() => void sendComment()}>{sendTo === 'new' ? 'Start session and send' : 'Send'}</button>
+          </div>
+        </div>
+      );
+    }
+    const name = picked && picked.key === sel?.key && picked.line >= range.start && picked.line <= range.end ? picked : null;
+    return (
+      <div className="linebar" onClick={(e) => e.stopPropagation()}>
+        <button className="primary" onClick={() => void startDoubt()}>Ask a doubt</button>
+        {name
+          ? <>
+            <button onClick={() => lookup(name.path, name.line, name.col, false)} title="⌘-click a name does this too">Go to definition of <code>{name.text}</code></button>
+            <button onClick={() => lookup(name.path, name.line, name.col, true)} title="⌘⌥-click a name does this too">Who uses <code>{name.text}</code></button>
+          </>
+          : <span className="hint">click a name in the line for its definition and uses</span>}
+        <button onClick={() => void showHistory()}>Who touched this</button>
+        <button onClick={() => void copyRef(false)}>Copy ref</button>
+        <button onClick={() => void copyRef(true)} title="the lines with three lines of context, fenced">Copy with code</button>
+        <button className="x" onClick={() => { setSel(null); setPicked(null); }} aria-label="close">✕</button>
+      </div>
+    );
+  }
 
   // ---- sync on demand: refetch the head, keep marks for untouched files, show what changed -------
   const sync = useCallback(async () => {
@@ -441,83 +597,78 @@ function Review({ prKey }: { prKey: string }) {
       }
       if (typing) return;
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.key === 'p') { e.preventDefault(); void openPalette('open'); return; }
-      if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); void openPalette('search'); return; }
-      if (mod && e.shiftKey && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); void openPalette('outline'); return; }
+      if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); void openPalette('all'); return; }
       if (mod || e.altKey) return;
-      if (e.key === 'a') { e.preventDefault(); setAgentOpen((v) => !v); }
-      else if (e.key === 'd') { e.preventDefault(); if (!commentTarget) { setToast('open a file first'); return; } setComment(''); setTimeout(() => commentRef.current?.focus(), 0); }
-      else if (e.key === 'p') { e.preventDefault(); void openPalette('open'); } // preventDefault: the p must not land in the input that autofocuses
-      else if (e.key === 'g') { e.preventDefault(); void openPalette('search'); }
-      else if (e.key === 'o') { e.preventDefault(); void openPalette('outline'); }
+      if (e.key === 'Escape') { setSel(null); setPicked(null); }
       else if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); stepHunk(e.shiftKey ? -1 : 1); }
-      else if (e.key === 'm') void toggleHunk();
-      else if (e.key === 'b') void showHistory();
-      else if (e.key === 'r') void sync();
-      else if (e.key === 'i') { if (pr?.prevHeadSha) setSince((v) => !v); else setToast('no previous head yet: nothing to compare since'); }
-      else if (e.key === 'y') void copyRef(false);
-      else if (e.key === 'Y') void copyRef(true);
       else if (e.key === 'u') void judge('understood');
-      else if (e.key === 'x') void judge('none');
-      else if (e.key === 'n') void skipNoise();
-      else if (e.key === 'e') setFullFile((v) => !v);
-      else if (e.key === 'w') setSplit((v) => !v);
-      else if (e.key === 's') switchTab(tab === 'files' ? 'commits' : tab === 'commits' ? 'repo' : tab === 'repo' ? 'doubts' : 'files');
-      else if (e.key === 'v') setShowDesc((x) => !x);
-      else if (e.key === '?') setShowHelp((x) => !x);
-      else if (e.key === 'Escape') setShowHelp(false);
-      else if (e.key === 'c' && tab === 'commits') {
-        if (view?.kind === 'chunk') { const c = pr?.chunks.find((k) => k.id === view.id); if (c) setView({ kind: 'commit', sha: c.sha }); }
-        else if (view?.kind === 'commit') { const c = pr?.chunks.find((k) => k.sha === view.sha); if (c) setView({ kind: 'chunk', id: c.id }); }
-      }
       else if (e.key === 'j') move(1);
       else if (e.key === 'k') move(-1);
-      else if (e.key === ']') jumpStack(1);
-      else if (e.key === '[') jumpStack(-1);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [judge, skipNoise, switchTab, move, jumpStack, openPalette, pickRow, copyRef, sendComment, commentTarget, comment, stepHunk, toggleHunk, showHistory, sync, tab, view, pr, palette, paletteRows, paletteIdx]);
+  }, [judge, move, openPalette, pickRow, sendComment, comment, stepHunk, palette, paletteRows, paletteIdx]);
 
   // ---- render -------------------------------------------------------------------------------------
   const theme = useMemo(() => ({ dark: 'github-dark' as const, light: 'github-light' as const }), []);
+  const themeType = uiTheme === 'light' ? 'light' as const : 'dark' as const; // dim keeps the dark syntax colors
 
   const diffOptionsFor = useCallback((it: Item) => ({
     diffStyle: (fullFile ? 'unified' : split ? 'split' : 'unified') as 'split' | 'unified',
     theme,
+    themeType,
     lineDiffType: 'word' as const,
     stickyHeader: true,
     expandUnchanged: fullFile,
     enableLineSelection: true,
-    onLineSelectionEnd: (range: SelectedLineRange | null) => setSel(range ? { key: it.key, range } : null),
-    onTokenClick: (p: { lineNumber: number; lineCharStart: number; side?: 'deletions' | 'additions' }, ev: MouseEvent) => {
-      if (p.side === 'deletions') return; // definitions resolve against the new side only
-      tokenClick(it.path, p.lineNumber, p.lineCharStart, ev);
+    enableGutterUtility: true,
+    onGutterUtilityClick: (range: SelectedLineRange) => { setSel({ key: it.key, range }); setComment(null); },
+    onLineClick: (p: { lineNumber: number; annotationSide: 'deletions' | 'additions'; event: PointerEvent }) => {
+      if (p.event.shiftKey || p.event.metaKey || p.event.ctrlKey) return; // a range or a jump, not a pick
+      setSel({ key: it.key, range: { start: p.lineNumber, end: p.lineNumber, side: p.annotationSide } });
+      setComment(null);
     },
+    onLineSelectionEnd: (range: SelectedLineRange | null) => setSel(range ? { key: it.key, range } : null),
+    onTokenClick: (p: Token & { side?: 'deletions' | 'additions' }, ev: MouseEvent) => {
+      if (p.side === 'deletions') return; // definitions resolve against the new side only
+      tokenClick(it.key, it.path, p, ev);
+    },
+    // hover answers are about the PR head, so the old side of a diff gets none
+    onTokenEnter: (p: Token & { side?: 'deletions' | 'additions' }, ev: PointerEvent) => { if (p.side !== 'deletions') tokenEnter(it.path, p, ev); },
+    onTokenLeave: () => tokenLeave(),
     loadDiffFiles: loaderFor(it)
-  }), [fullFile, split, theme, tokenClick]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [fullFile, split, theme, themeType, tokenClick, tokenEnter, tokenLeave]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fileOptionsFor = useCallback((path: string) => ({
     theme,
+    themeType,
     stickyHeader: true,
     enableLineSelection: true,
+    enableGutterUtility: true,
+    onGutterUtilityClick: (range: SelectedLineRange) => { setSel({ key: path, range }); setComment(null); },
+    onLineClick: (p: { lineNumber: number; event: PointerEvent }) => {
+      if (p.event.shiftKey || p.event.metaKey || p.event.ctrlKey) return;
+      setSel({ key: path, range: { start: p.lineNumber, end: p.lineNumber } });
+      setComment(null);
+    },
     onLineSelectionEnd: (range: SelectedLineRange | null) => setSel(range ? { key: path, range } : null),
-    onTokenClick: (p: { lineNumber: number; lineCharStart: number }, ev: MouseEvent) => tokenClick(path, p.lineNumber, p.lineCharStart, ev)
-  }), [theme, tokenClick]);
+    onTokenClick: (p: Token, ev: MouseEvent) => tokenClick(path, path, p, ev),
+    onTokenEnter: (p: Token, ev: PointerEvent) => tokenEnter(path, p, ev),
+    onTokenLeave: () => tokenLeave()
+  }), [theme, themeType, tokenClick, tokenEnter, tokenLeave]);
 
-  type Ann = { hunk?: number; doubt?: string };
+  type Ann = { doubt?: string; bar?: boolean };
   const annotationsFor = useCallback((it: Item): DiffLineAnnotation<Ann>[] => {
-    const hunks: DiffLineAnnotation<Ann>[] = (hunksOf.get(it.key) ?? []).filter((h) => isHunkRead(it.key, h.index)).map((h) => (
-      h.newCount > 0 ? { side: 'additions' as const, lineNumber: h.newStart, metadata: { hunk: h.index } } : { side: 'deletions' as const, lineNumber: h.oldStart, metadata: { hunk: h.index } }
-    ));
-    const answers: DiffLineAnnotation<Ann>[] = (pr?.doubts ?? [])
+    const answers = (pr?.doubts ?? [])
       .filter((d) => d.path === it.path && d.lines && !d.resolved)
       .map((d) => ({ side: 'additions' as const, lineNumber: d.lines!.end, metadata: { doubt: d.id } }));
-    return [...hunks, ...answers];
-  }, [hunksOf, isHunkRead, pr?.doubts]);
+    if (sel?.key !== it.key) return answers;
+    const end = Math.max(sel.range.start, sel.range.end);
+    return [...answers, { side: sel.range.endSide ?? sel.range.side ?? 'additions', lineNumber: end, metadata: { bar: true } }];
+  }, [pr?.doubts, sel]);
 
-  const renderAnn = useCallback((a: DiffLineAnnotation<Ann>) => {
-    if (a.metadata.hunk !== undefined) return <div className="hunk-read">✓ hunk read</div>;
+  const renderAnn = useCallback((a: { metadata: Ann }) => {
+    if (a.metadata.bar) return lineBar();
     const d = pr?.doubts.find((x) => x.id === a.metadata.doubt);
     if (!d) return null;
     const open = openAnswers.has(d.id);
@@ -527,7 +678,7 @@ function Review({ prKey }: { prKey: string }) {
         {d.answer ? d.answer : <span className="wait">{d.done ? 'no answer' : 'waiting for the session…'}</span>}
       </div>
     );
-  }, [pr?.doubts, openAnswers]);
+  }, [pr?.doubts, openAnswers, lineBar]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // context expansion: pierre asks for both full sides when a collapsed region is opened, or at once in full-file mode
   function loaderFor(it: Item) {
@@ -556,7 +707,17 @@ function Review({ prKey }: { prKey: string }) {
         <a className="home" href="#/" title="all pull requests">doubt</a>
         <span className="title">#{pr.number} {pr.title}</span>
         <span className="meta">{pr.owner}/{pr.repo} · {pr.author} · {pr.baseRef} ← {pr.headSha.slice(0, 7)}</span>
-        <span className="progress"><b>{readCount}</b> / {pr.files.length} files read{noiseLeft ? <> · {noiseLeft} noise, <kbd>n</kbd> skips</> : null}{changedSet.size ? <> · {changedSet.size} changed since {pr.prevHeadSha?.slice(0, 7)}</> : null} · <kbd>r</kbd> sync</span>
+        <span className="progress" title={`${readCount} of ${pr.files.length} files read`}>
+          <span className="pbar"><i style={{ width: `${pr.files.length ? Math.round((readCount / pr.files.length) * 100) : 0}%` }} /></span>
+          <b>{readCount}</b> of {pr.files.length} read
+        </span>
+        <button className={showDesc ? 'on' : ''} onClick={() => setShowDesc((x) => !x)} title="the PR description, above the diff">Description</button>
+        <button onClick={() => void sync()} title="refetch the PR head; files you read stay read unless their content changed">
+          Sync{changedSet.size ? <span className="badge" title={`changed since ${pr.prevHeadSha?.slice(0, 7)}`}>{changedSet.size} changed</span> : null}
+        </button>
+        <button className={agentOpen ? 'on' : ''} onClick={() => setAgentOpen((v) => !v)} title="your Claude Code sessions, as terminals, and the answers to your doubts">Agent{unseen ? <span className="badge">{unseen} new</span> : null}</button>
+        <button className="cmdk" onClick={() => void openPalette('all')} title="open a file, search the repo, run any action">Open, search, actions… <kbd>⌘K</kbd></button>
+        <button className="theme" onClick={() => setUiTheme((t) => THEMES[(THEMES.indexOf(t) + 1) % THEMES.length])} title="switch theme: dark, dim, light">Theme: {uiTheme}</button>
       </div>
 
       <div className="queue">
@@ -567,11 +728,14 @@ function Review({ prKey }: { prKey: string }) {
           <button className={tab === 'doubts' ? 'on' : ''} onClick={() => switchTab('doubts')}>Doubts{pr.doubts.filter((d) => d.path && !d.resolved).length ? ` ${pr.doubts.filter((d) => d.path && !d.resolved).length}` : ''}</button>
 
         </div>
+        {tab === 'files' && noiseLeft > 0 && (
+          <div className="treebar"><button onClick={() => void skipNoise()} title="lockfiles, generated files, snapshots and whitespace-only changes">Skip {noiseLeft} noise file{noiseLeft === 1 ? '' : 's'}</button></div>
+        )}
         {tab === 'files' && <Tree paths={pr.files.map((f) => f.path)} meta={fileByPath} readFiles={pr.readFiles} changed={changedSet} signals={pr.signals} current={currentPath} onPick={(p) => openPath(p)} />}
         {tab === 'repo' && (tree.length ? <Tree paths={tree} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={(p) => openPath(p)} repo /> : <div className="empty">loading tree…</div>)}
         {tab === 'doubts' && (
           <div className="doubts">
-            {pr.doubts.filter((d) => d.path).length === 0 && <div className="empty">no doubts yet: select lines, <kbd>d</kbd>, write, <kbd>⌘enter</kbd></div>}
+            {pr.doubts.filter((d) => d.path).length === 0 && <div className="empty">no doubts yet: click a line, then Ask a doubt</div>}
             {[...pr.doubts].filter((d) => d.path).reverse().map((d) => (
               <div key={d.id} className={`doubt ${d.resolved ? 'resolved' : ''} ${openAnswers.has(d.id) ? 'open' : ''}`} onClick={() => { openPath(d.path!, d.lines?.start); setOpenAnswers((s) => new Set(s).add(d.id)); }}>
                 <div className="where">
@@ -608,24 +772,50 @@ function Review({ prKey }: { prKey: string }) {
 
       <div className="main" onMouseDown={(e) => { if (!(e.target as HTMLElement).closest('input,textarea')) (e.currentTarget.closest('.app') as HTMLElement | null)?.focus(); }}>
         <div className="bar">
+          {view?.kind !== 'repo' && (
+            <span className="nav">
+              <button onClick={() => move(-1)} title="previous (k)" aria-label="previous">‹</button>
+              <button onClick={() => move(1)} title="next (j)" aria-label="next">›</button>
+            </span>
+          )}
           {view?.kind === 'repo'
             ? <><span className="path">{view.path}</span><span className="meta2">at PR head · not changed by this PR</span></>
             : commit
               ? <><span className="path">{commit.sha.slice(0, 7)} {commit.subject}</span><span className="meta2">{items.length} files · {commit.author}</span></>
               : head
-                ? <><span className="path">{head.path}</span><span className="meta2">{head.oldRev === 'base' ? (since && changedSet.has(head.path) ? `since ${pr.prevHeadSha?.slice(0, 7)}` : 'vs merge-base') : head.newRev.slice(0, 7)} · {head.status} · +{head.adds}/-{head.dels}{head.read ? ' · read' : ''}{changedSet.has(head.path) ? <> · changed since your read, <kbd>i</kbd> {since ? 'whole diff' : 'only what changed'}</> : null}</span></>
+                ? <><span className="path">{head.path}</span><span className="meta2">{head.oldRev === 'base' ? (since && changedSet.has(head.path) ? `since ${pr.prevHeadSha?.slice(0, 7)}` : 'vs merge-base') : head.newRev.slice(0, 7)} · {head.status} · +{head.adds}/-{head.dels}</span></>
                 : <span>nothing left to read</span>}
-          {head && (pr.signals?.[head.path] ?? []).length > 0 && (
-            <span className="sigline">{(pr.signals?.[head.path] ?? []).map((x) => {
-              const note = x.kind === 'owners' ? x.note.split(' ').slice(0, 2).join(' ') + (x.note.split(' ').length > 2 ? ` +${x.note.split(' ').length - 2}` : '') : x.note;
-              return <span key={x.kind} title={x.note}><b>{x.kind}</b> {note} &nbsp;</span>;
-            })}</span>
-          )}
           <span className="keys">
-            {flatHunks.length ? <span className="hunkpos">hunk {cursor ? flatHunks.findIndex((x) => x.key === cursor.key && x.hunk.index === cursor.hunk) + 1 : 0}/{flatHunks.length}</span> : null}
-            <kbd>?</kbd> keys
+            {flatHunks.length ? <span className="hunkpos" title="space / shift+space">change {cursor ? flatHunks.findIndex((x) => x.key === cursor.key && x.hunk.index === cursor.hunk) + 1 : 0}/{flatHunks.length}</span> : null}
+            {head && head.oldRev === 'base' && changedSet.has(head.path) && (
+              <span className="seg" role="group" aria-label="what to show of a file that changed since your read">
+                <button className={since ? '' : 'on'} onClick={() => setSince(false)}>Whole diff</button>
+                <button className={since ? 'on' : ''} onClick={() => setSince(true)} title={`only what changed since ${pr.prevHeadSha?.slice(0, 7)}`}>Since your read</button>
+              </span>
+            )}
+            {view?.kind !== 'repo' && head && (
+              <>
+                <span className="seg" role="group" aria-label="layout">
+                  <button className={split && !fullFile ? '' : 'on'} onClick={() => setSplit(false)}>Unified</button>
+                  <button className={split && !fullFile ? 'on' : ''} onClick={() => { setSplit(true); setFullFile(false); }} title="side by side">Split</button>
+                </span>
+                <span className="seg" role="group" aria-label="scope">
+                  <button className={fullFile ? '' : 'on'} onClick={() => setFullFile(false)}>Changes</button>
+                  <button className={fullFile ? 'on' : ''} onClick={() => setFullFile(true)} title="the whole file with the changes inline">Whole file</button>
+                </span>
+                <button className={`markread ${items.every((i) => i.read) ? 'done' : ''}`} onClick={() => void judge(items.every((i) => i.read) ? 'none' : 'understood')} title={items.every((i) => i.read) ? 'mark unread' : 'mark read and open the next unread (u)'}>
+                  {items.every((i) => i.read) ? '✓ Read' : commit ? 'Mark commit read' : 'Mark read'}
+                </button>
+              </>
+            )}
           </span>
         </div>
+        {head && (pr.signals?.[head.path] ?? []).length > 0 && (
+            <div className="sigline">{(pr.signals?.[head.path] ?? []).map((x) => {
+              const note = x.kind === 'owners' ? x.note.split(' ').slice(0, 2).join(' ') + (x.note.split(' ').length > 2 ? ` +${x.note.split(' ').length - 2}` : '') : x.note;
+              return <span key={x.kind} title={x.note}><b>{x.kind}</b> {note} &nbsp;</span>;
+            })}</div>
+          )}
         {showDesc && (
           <div className="desc">
             {pr.body?.trim()
@@ -635,101 +825,34 @@ function Review({ prKey }: { prKey: string }) {
         )}
         <div className="diff" ref={diffRef}>
           {view?.kind === 'repo' && (repoFile
-            ? <div className="stack"><PierreFile file={{ name: repoFile.path, contents: repoFile.contents }} options={fileOptionsFor(repoFile.path)} selectedLines={sel?.key === repoFile.path ? sel.range : null} disableWorkerPool /></div>
+            ? <div className="stack"><PierreFile<Ann> file={{ name: repoFile.path, contents: repoFile.contents }} options={fileOptionsFor(repoFile.path)} selectedLines={sel?.key === repoFile.path ? sel.range : null} lineAnnotations={sel?.key === repoFile.path ? [{ lineNumber: Math.max(sel.range.start, sel.range.end), metadata: { bar: true } }] : []} renderAnnotation={renderAnn} disableWorkerPool /></div>
             : <div className="empty">loading {view.path}…</div>)}
           {view?.kind !== 'repo' && items.length === 0 && <div className="empty">every file read</div>}
           {items.map((it) => (
             <div key={it.key} className={`stack ${it.read ? 'understood' : ''}`} data-key={it.key}>
               {patches[it.key] !== undefined
                 ? patches[it.key].trim()
-                  ? <PatchDiff<Ann> key={`${it.key}:${fullFile}:${split}`} patch={patches[it.key]} options={diffOptionsFor(it)} selectedLines={sel?.key === it.key ? sel.range : null} lineAnnotations={annotationsFor(it)} renderAnnotation={renderAnn} disableWorkerPool />
+                  ? <PatchDiff<Ann> key={`${it.key}:${fullFile}:${split}:${themeType}`} patch={patches[it.key]} options={diffOptionsFor(it)} selectedLines={sel?.key === it.key ? sel.range : null} lineAnnotations={annotationsFor(it)} renderAnnotation={renderAnn} disableWorkerPool />
                   : <div className="empty">{it.path}: no textual diff (binary or empty)</div>
                 : <div className="empty">loading {it.path}…</div>}
             </div>
           ))}
         </div>
+        <div className="keyhints"><span><kbd>j</kbd> <kbd>k</kbd> next / previous</span><span><kbd>space</kbd> next change</span><span><kbd>u</kbd> mark read</span><span><kbd>⌘K</kbd> everything else</span><span><kbd>esc</kbd> close</span></div>
       </div>
 
       {palette && (
-        <div className="palette" onClick={() => setPalette(null)}>
-          <div className="box" onClick={(e) => e.stopPropagation()}>
-            <div className="mode">
-              <span><b>{palette.mode === 'open' ? 'open file' : palette.mode === 'search' ? 'search repo' : palette.mode === 'outline' ? 'outline' : palette.mode === 'history' ? 'history' : palette.title}</b></span>
-              {palette.mode === 'history' && <span>{palette.title} · who last touched these lines, at the PR head</span>}
-              {palette.mode === 'outline' && <span>{palette.title}</span>}
-              {palette.mode === 'locs' && <span>{palette.rows.length} places</span>}
-              {palette.mode === 'search' && <span>{palette.rows.length ? `${palette.rows.length} hits` : 'git grep, case-insensitive'}</span>}
-            </div>
-            {palette.mode !== 'locs' && palette.mode !== 'history' && (
-              <input autoFocus value={palette.query} placeholder={palette.mode === 'open' ? 'file name…' : palette.mode === 'search' ? 'text to find…' : 'symbol…'} onChange={(e) => { const v = e.target.value; setPalette((p) => (p ? { ...p, query: v } : p)); setPaletteIdx(0); }} />
-            )}
-            <div className="list">
-              {paletteRows.length === 0
-                ? <div className="none">{palette.mode === 'open' ? `${tree.length} files in the repo` : palette.mode === 'outline' ? 'no symbols found' : palette.query.length < 2 ? 'type at least two characters' : 'no match'}</div>
-                : paletteRows.map((r, i) => (
-                  <div key={`${r.path}:${r.line ?? ''}:${i}`} className={`row ${i === paletteIdx ? 'on' : ''}`} onMouseEnter={() => setPaletteIdx(i)} onClick={() => pickRow(r)}>
-                    {r.kind && <span className="kind">{r.kind}</span>}
-                    {palette.mode === 'open' && <span className="st">{fileByPath.get(r.path)?.status ?? ''}</span>}
-                    <span className={palette.mode === 'open' ? '' : 'text'}>{r.label}</span>
-                    {r.sub !== undefined && <span className="dir">{r.sub}</span>}
-                    {r.line !== undefined && <span className="line">{r.line}</span>}
-                  </div>
-                ))}
-            </div>
-          </div>
-        </div>
+        <Palette palette={palette} rows={paletteRows} index={paletteIdx} fileCount={tree.length} onIndex={setPaletteIdx} onClose={() => setPalette(null)} onPick={pickRow}
+          onQuery={(v) => { setPalette((p) => (p ? { ...p, query: v } : p)); setPaletteIdx(0); }} />
       )}
-      {agentOpen && <Agent ref={agentRef} workdir={pr.dir} workdirLabel={`${pr.repo}#${pr.number}`} onClose={() => setAgentOpen(false)} />}
+      <Agent ref={agentRef} open={agentOpen} theme={uiTheme} workdir={pr.dir} workdirLabel={`${pr.repo}#${pr.number}`} doubts={pr.doubts} seen={seen ?? new Set()} onPickDoubt={pickDoubt} onClose={() => setAgentOpen(false)} />
 
-      {comment !== null && commentTarget && (
-        <div className="comment" style={{ right: agentOpen ? 540 : 24, bottom: 24 }}>
-          <div className="ref">{commentTarget.range ? `${commentTarget.path}:${commentTarget.range.start}-${commentTarget.range.end}` : commentTarget.path}</div>
-          <textarea ref={commentRef} rows={4} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="what should the agent look at here?" />
-          <div className="to">to <b>{agentRef.current?.activeTitle() ?? 'no session open, press a'}</b> · <kbd>⌘</kbd><kbd>enter</kbd> send · <kbd>esc</kbd> cancel</div>
-        </div>
-      )}
-      {showHelp && (
-        <div className="palette" onClick={() => setShowHelp(false)}>
-          <div className="box help" onClick={(e) => e.stopPropagation()}>
-            <div className="mode"><span><b>keys</b></span><span>press <kbd>?</kbd> or <kbd>esc</kbd> to close</span></div>
-            <div className="cols">
-              <div>
-                <h4>read</h4>
-                <div><kbd>u</kbd> read the shown file or commit, next unread</div>
-                <div><kbd>x</kbd> unmark</div>
-                <div><kbd>n</kbd> mark every noise file read</div>
-                <div><kbd>space</kbd> / <kbd>⇧space</kbd> next / previous hunk</div>
-                <div><kbd>m</kbd> mark the current hunk read</div>
-                <div><kbd>j</kbd> / <kbd>k</kbd> next / previous file or commit</div>
-                <div><kbd>[</kbd> / <kbd>]</kbd> files inside a stacked commit</div>
-                <h4>view</h4>
-                <div><kbd>e</kbd> whole file with inline hunks, or hunks only</div>
-                <div><kbd>w</kbd> split or unified</div>
-                <div><kbd>c</kbd> in Commits: whole commit or one file</div>
-                <div><kbd>v</kbd> PR description</div>
-                <div><kbd>i</kbd> only what changed since the previous head</div>
-                <div><kbd>s</kbd> cycle Changes, Commits, Repo, Doubts</div>
-              </div>
-              <div>
-                <h4>find</h4>
-                <div><kbd>p</kbd> open any file by name</div>
-                <div><kbd>g</kbd> search the repo</div>
-                <div><kbd>o</kbd> outline of the file in focus</div>
-                <div><kbd>b</kbd> who last touched the selected lines</div>
-                <div><kbd>⌘</kbd>click go to definition · <kbd>⌘⌥</kbd>click references</div>
-                <h4>take out</h4>
-                <div><kbd>y</kbd> copy path:line · <kbd>Y</kbd> copy with context</div>
-                <h4>agent</h4>
-                <div><kbd>a</kbd> agent sidebar: your Claude Code sessions, as terminals</div>
-                <div><kbd>d</kbd> review comment on the selected lines, <kbd>⌘enter</kbd> sends</div>
-                <h4>sync</h4>
-                <div><kbd>r</kbd> refetch the head, keep marks for untouched files</div>
-              </div>
-            </div>
-          </div>
-        </div>
+      {hover && (
+        <HoverCard info={hover.info} name={hover.name} x={hover.x} y={hover.y} onOpen={(p, l) => { setHover(null); openPath(p, l); }}
+          onEnter={() => window.clearTimeout(hoverTimer.current)} onLeave={tokenLeave} />
       )}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }
+

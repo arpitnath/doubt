@@ -1,7 +1,7 @@
 // Answers anchored to lines come from the session's transcript on disk, never from the terminal
 // stream. Claude Code appends every message to ~/.claude/projects/<encoded cwd>/<session>.jsonl.
 // After a comment is sent, we find the user turn that carries it and take the assistant text that
-// follows, up to the next user turn.
+// follows, up to the end of that turn: the CLI's turn_duration record, or the next user turn.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -33,7 +33,8 @@ function turns(file: string): Turn[] {
   for (const line of readFileSync(file, 'utf8').split('\n')) {
     if (!line) continue;
     try {
-      const o = JSON.parse(line) as { type?: string; uuid?: string; parentUuid?: string; timestamp?: string; message?: { role?: string; content?: unknown } };
+      const o = JSON.parse(line) as { type?: string; subtype?: string; uuid?: string; parentUuid?: string; timestamp?: string; message?: { role?: string; content?: unknown } };
+      if (o.type === 'system' && o.subtype === 'turn_duration') { out.push({ type: 'end', text: '', uuid: o.uuid || '' }); continue; }
       if (o.type !== 'user' && o.type !== 'assistant') continue;
       const c = o.message?.content;
       const text = typeof c === 'string' ? c : Array.isArray(c) ? (c as Array<{ type?: string; text?: string }>).filter((b) => b.type === 'text' && b.text).map((b) => b.text).join('\n') : '';
@@ -52,6 +53,7 @@ export function answerTo(file: string, marker: string): { text: string; done: bo
   let done = false;
   for (let j = i + 1; j < all.length; j++) {
     const t = all[j];
+    if (t.type === 'end') { done = true; break; } // the CLI closed the turn
     if (t.type === 'user') {
       // tool results also arrive as user turns; a real user turn with prose ends the answer
       if (t.text.trim().length > 0 && !t.text.startsWith('<')) { done = true; break; }

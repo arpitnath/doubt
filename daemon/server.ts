@@ -6,7 +6,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
-import { parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, prFiles, prFileDiff, fileAt, lsTree, grep, history, type Commit } from './git.js';
+import { git, authEnv, parsePrUrl, checkout, commits, commitFiles, fileDiff, fullDiff, prFiles, prFileDiff, fileAt, lsTree, grep, history, type Commit } from './git.js';
 import { Lang } from './lang.js';
 import { WebSocketServer } from 'ws';
 import { listSessions } from '@anthropic-ai/claude-agent-sdk';
@@ -27,7 +27,7 @@ const uiDist = join(here, '..', 'ui', 'dist');
 
 // ---- open PRs -----------------------------------------------------------------------------------
 
-interface Open { state: PrState; commitBySha: Map<string, Commit>; treePaths: string[]; openedAt: number; lang?: Lang }
+interface Open { state: PrState; commitBySha: Map<string, Commit>; treePaths: string[]; openedAt: number; lang?: Lang; base?: Promise<Map<string, string>> }
 const open = new Map<string, Open>();
 const opening = new Map<string, Promise<Open>>(); // ponytail: a double paste must not clone twice
 
@@ -71,7 +71,7 @@ async function openPr(url: string, force = false): Promise<Open> {
         title: meta.title, author: meta.author,
         headSha: meta.headSha, baseSha: co.baseSha, baseRef: meta.baseRef,
         dir: co.dir, diffFile, commits: list, chunks, files, readFiles: {}, doubts: prev?.doubts ?? [],
-        hunkMarks: {}, prevHeadSha: prev?.headSha, changedSince, body: meta.body,
+        prevHeadSha: prev?.headSha, changedSince, body: meta.body,
         signals: computeSignals(co.dir, readText(diffFile, 'utf8'), chunks)
       };
       carryOver(state, prev);
@@ -81,6 +81,18 @@ async function openPr(url: string, force = false): Promise<Open> {
 
     const o: Open = { state, commitBySha: new Map(state.commits.map((c) => [c.sha, c])), treePaths: await lsTree(state.dir, state.headSha), openedAt: have?.openedAt ?? Date.now(), lang: state.headSha === have?.state.headSha ? have?.lang : undefined };
     open.set(key, o);
+    // ponytail: build the language service for the first source file once the page has loaded it, then
+    // the base texts and the base project for "signature before"; together they hold the event loop for
+    // about 3s, once per PR. Move them to a worker if that ever shows.
+    const first = state.files.find((f) => f.kind === 'src' && /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f.path));
+    if (first && !o.lang) setTimeout(async () => {
+      try {
+        const lang = langOf(o);
+        lang.warm(first.path);
+        lang.setBase(await (o.base ??= baseTexts(o.state)));
+        lang.warm(first.path, true);
+      } catch { /* the first hover builds what is missing */ }
+    }, 2000).unref();
     return o;
   })();
 
@@ -94,6 +106,36 @@ async function openForReview(url: string): Promise<Open> {
   logEvent({ type: 'open', pr: stateKey(o.state), head: o.state.headSha });
   return o;
 }
+
+// Where a session runs, relative to the PR under review: its checkout, another PR's checkout of the
+// same repo, the user's own clone of it (by remote), or unrelated. Remotes are read once per folder.
+const remotes = new Map<string, Promise<string>>();
+async function relation(s: PrState, cwd: string): Promise<'this-pr' | 'other-pr' | 'clone' | 'other'> {
+  if (cwd === s.dir) return 'this-pr';
+  if (cwd.startsWith(`${WORK_ROOT}/`) && new RegExp(`^${escapeRe(`${s.owner}-${s.repo}`)}-\\d+$`).test(cwd.slice(WORK_ROOT.length + 1))) return 'other-pr'; // not usebruno-bruno-api-docs-103 for usebruno/bruno
+  if (cwd.startsWith(`${WORK_ROOT}/`) || !existsSync(cwd)) return 'other';
+  if (!remotes.has(cwd)) remotes.set(cwd, git(cwd, ['remote', '-v']).catch(() => ''));
+  const repo = new RegExp(`github\\.com[:/]${s.owner}/${s.repo}(\\.git)?\\s`, 'i');
+  return repo.test(await remotes.get(cwd)!) ? 'clone' : 'other';
+}
+
+function langOf(o: Open): Lang {
+  if (!o.lang) { console.error(`> building language service for ${o.state.owner}/${o.state.repo}#${o.state.number}`); o.lang = new Lang(o.state.dir, o.treePaths); }
+  return o.lang;
+}
+
+// The PR base's text of every file the PR modifies or renames, by absolute head path, for "signature
+// before". The clone is blob-filtered, so git may fetch these, which needs the token.
+async function baseTexts(s: PrState): Promise<Map<string, string>> {
+  const env = authEnv(await ghToken());
+  const out = new Map<string, string>();
+  await Promise.all(s.files.filter((f) => f.status[0] !== 'A').map(async (f) => {
+    try { out.set(join(s.dir, f.path), await git(s.dir, ['show', `${s.baseSha}:${f.oldPath ?? f.path}`], env)); } catch { /* binary or unreadable: no "before" for it */ }
+  }));
+  return out;
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // everything we have ever opened: in memory first, then state files on disk
 function knownPrs(): Array<{ key: string; url: string; owner: string; repo: string; number: number; title: string; author: string; read: number; files: number; open: boolean; updated: number }> {
@@ -179,9 +221,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // ---- agent sidebar: sessions on disk, terminals running here --------------------------------
   if (req.method === 'GET' && url.pathname === '/api/agent/sessions') {
     const all = await listSessions({ limit: 300 });
-    const sessions = all
-      .map((x) => ({ sessionId: x.sessionId, cwd: x.cwd, gitBranch: x.gitBranch, summary: x.customTitle || x.summary || x.firstPrompt || '', lastModified: x.lastModified, fileSize: x.fileSize }))
-      .sort((a, b) => b.lastModified - a.lastModified);
+    const o = open.get(url.searchParams.get('pr') || '');
+    const sessions = (await Promise.all(all.map(async (x) => ({
+      sessionId: x.sessionId, cwd: x.cwd, gitBranch: x.gitBranch, summary: x.customTitle || x.summary || x.firstPrompt || '', lastModified: x.lastModified, fileSize: x.fileSize,
+      // for a PR: what the session will see when it reads files, from where it runs
+      ...(o && x.cwd ? { group: await relation(o.state, x.cwd), missing: !existsSync(x.cwd) } : {})
+    })))).sort((a, b) => b.lastModified - a.lastModified);
     return json(res, 200, { sessions });
   }
   if (req.method === 'GET' && url.pathname === '/api/agent/terms') return json(res, 200, { terms: listTerms() });
@@ -219,9 +264,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       c.question.trim()
     ].join('\n');
     logEvent({ type: 'doubt', pr: prKey, path: c.path, lines: c.lines });
-    st.doubts.push({ id, chunkId: '', path: c.path, lines: c.lines, question: c.question.trim(), answer: '', at: Date.now(), termCwd: term.cwd, sessionId: term.sessionId, marker, termStartedAt: term.startedAt, done: false });
+    st.doubts.push({ id, chunkId: '', path: c.path, lines: c.lines, question: c.question.trim(), answer: '', at: Date.now(), termCwd: term.cwd, sessionId: term.sessionId, marker, termStartedAt: term.startedAt, title: term.title, done: false });
     save(st);
-    writeTerm(termId, text, true);
+    writeTerm(termId, text, true, true); // a session that is still starting gets it once its input is ready
     return json(res, 200, { ok: true, doubt: id });
   }
   if (req.method === 'POST' && url.pathname === '/api/agent/resolve') {
@@ -268,29 +313,28 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return json(res, 200, { entries: await history(s.dir, rev, path, start, end) });
   }
 
-  // hunk marks: finer than a file, for big files read across sittings
-  if (req.method === 'POST' && url.pathname === '/api/hunk') {
-    const body = await readJson(req);
-    const key = String(body.key || '');
-    const index = Number(body.index);
-    if (!key || !Number.isInteger(index)) return json(res, 400, { error: 'key and index required' });
-    const marks = (s.hunkMarks ??= {});
-    const set = new Set(marks[key] ?? []);
-    body.read === false ? set.delete(index) : set.add(index);
-    marks[key] = [...set].sort((a, b) => a - b);
-    save(s);
-    return json(res, 200, { ok: true, hunkMarks: marks });
-  }
-
   // go to definition / find references, TypeScript and JavaScript only; the service builds on first use
   if (req.method === 'GET' && (url.pathname === '/api/def' || url.pathname === '/api/refs')) {
     const path = url.searchParams.get('path') || '';
     const line = Number(url.searchParams.get('line'));
     const col = Number(url.searchParams.get('col'));
     if (!path || !line) return json(res, 400, { error: 'path and line required' });
-    if (!o.lang) { console.error(`> building language service for ${s.owner}/${s.repo}#${s.number}`); o.lang = new Lang(s.dir, o.treePaths); }
-    const locs = url.pathname === '/api/def' ? o.lang.definitions(path, line, col) : o.lang.references(path, line, col);
+    const locs = url.pathname === '/api/def' ? langOf(o).definitions(path, line, col) : langOf(o).references(path, line, col);
     return json(res, 200, { locs });
+  }
+
+  // hover: TypeScript's answers about a name, plus which of the files using it this PR also changes
+  if (req.method === 'GET' && url.pathname === '/api/hover') {
+    const path = url.searchParams.get('path') || '';
+    const line = Number(url.searchParams.get('line'));
+    const col = Number(url.searchParams.get('col'));
+    if (!path || !line) return json(res, 400, { error: 'path and line required' });
+    const lang = langOf(o);
+    lang.setBase(await (o.base ??= baseTexts(s)));
+    const h = lang.hover(path, line, col);
+    if (!h) return json(res, 200, { hover: null });
+    const inPr = new Set(s.files.map((f) => f.path));
+    return json(res, 200, { hover: { ...h, refs: h.refs.length, changed: h.refs.filter((f) => f !== path && inPr.has(f)) } });
   }
 
   // one file's diff: within one commit (`chunk`), or PR-wide against the merge-base (`path`)

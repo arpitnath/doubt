@@ -32,6 +32,7 @@ export interface Doubt {
   sessionId?: string;
   marker?: string;
   termStartedAt?: number;
+  title?: string; // the session the doubt went to, as its tab is named
   done?: boolean;
   resolved?: boolean;
 }
@@ -54,7 +55,6 @@ export interface PrState {
   chunks: Chunk[];
   files: PrFile[];
   readFiles: Record<string, string>; // path -> `${oldBlob}:${newBlob}` when fully read
-  hunkMarks?: Record<string, number[]>; // item key (path, or chunk id) -> indexes of hunks marked read
   prevHeadSha?: string; // the head before the last sync that changed it; enables per-file interdiff
   changedSince?: string[]; // files whose content changed at that sync
   signals?: Record<string, Signal[]>; // attention markers per file, facts only
