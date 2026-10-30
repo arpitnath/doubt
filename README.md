@@ -20,49 +20,37 @@ For each PR the daemon clones the base repo (blob-filtered) under `~/.doubt/work
 
 ## Reading
 
-The sidebar has three tabs, `s` cycles. **Changes** is a GitHub-style tree of every file the PR changes against its merge-base, with status, counts, a kind badge (test, docs, cfg, lock, gen, snap) and `ws` when the change is whitespace only. Click a file to read its PR-wide diff; `j`/`k` walk the files in reading order: source first, then tests, then docs and config, then generated files and lockfiles. **Commits** lists commits oldest first; click one to see every file it touched stacked, `c` drops to one file. **Repo** is the whole tree at the PR head, like an editor's explorer, folded except where the changes live; any file opens read-only for context. `p` opens any file by fuzzy name.
+Everything is a visible control; the keyboard is a shortcut, not the way in.
 
-Lockfiles, generated files, snapshots and whitespace-only changes are noise: the top bar counts them and `n` marks them all read in one go.
+The sidebar has four tabs. **Changes** is a GitHub-style tree of every file the PR changes against its merge-base, with status, counts, a kind badge (test, docs, cfg, lock, gen, snap) and `ws` when the change is whitespace only. Click a file to read its PR-wide diff; ‹ and › in the file bar (or `j`/`k`) walk the files in reading order: source first, then tests, then docs and config, then generated files and lockfiles. **Commits** lists commits oldest first; click one to see every file it touched stacked, or a file under it for that file alone. **Repo** is the whole tree at the PR head, folded except where the changes live; any file opens read-only for context. **Doubts** lists every doubt you asked.
 
-A file is read when every commit's change to it is read, in either tab. Read marks are keyed by the file's content, so after the author pushes again only the files that actually changed come back as unread.
+Lockfiles, generated files, snapshots and whitespace-only changes are noise: when there is any, **Skip noise** above the tree marks it all read.
 
-Select lines by clicking line numbers; that selection is what `y`, `Y` and the outline use as the file in focus. Changed lines highlight the changed words. Collapsed context expands to the full file, or `e` shows the whole file with the hunks inline, like Zed; `w` switches split and unified. Click the page once after it opens so it has keyboard focus.
+The file bar switches **Unified / Split** and **Changes / Whole file** (the whole file with the changes inline, like Zed), and **Mark read** settles the file or commit and opens the next unread one; click it again to unmark. A file is read when every commit's change to it is read, in either tab. Read marks are keyed by the file's content, so after the author pushes again only the files that actually changed come back as unread. **Sync** in the top bar refetches the head on demand and badges what changed; for such a file, **Since your read** shows only what changed since then. **Description** shows the PR body above the diff. The theme (dark, dim, light) sits at the end of the top bar.
+
+**Line actions.** Click a line, or the `+` that appears in its gutter, and a bar opens under it: **Ask a doubt**, **Go to definition** and **Who uses** (of the name you clicked in that line), **Who touched this** (the commits and PR numbers that last changed those lines), **Copy ref** (`path:line`) and **Copy with code** (a fenced snippet with context). Drag over line numbers for a range. `⌘`-click a name goes to its definition and `⌘⌥`-click lists its references, as shortcuts.
+
+**⌘K** opens one palette for everything: every action on the screen, and as you type, files in the whole repo with this PR's files first. Searching the repo (git grep) and the outline of the file in focus are entries in it.
 
 | key | does |
 |---|---|
-| `u` | read: settle the shown file or commit, show the next unread one |
-| `x` | unmark it |
-| `n` | mark every noise file read |
 | `j` / `k` | next / previous file (reading order) or commit |
-| `s` | cycle Changes, Commits, Repo |
-| `p` | open any file by fuzzy name |
-| `g` | search the repo (git grep, case-insensitive), Enter lands on the line |
-| `o` | outline of the file in focus: functions, classes, types, tests; Enter jumps |
-| `y` / `Y` | copy `path:line` for the selected lines, or a fenced snippet with context |
-| `⌘`click | go to definition of a token; `⌘⌥`click lists its references (TypeScript and JavaScript, built on first use) |
-| `a` | open or hide the agent sidebar |
-| `d` | review comment on the selected lines, sent to the active session with `⌘enter`; the answer comes back under those lines and in the Doubts tab |
-| `space` / `⇧space` | next / previous hunk |
-| `m` | mark the current hunk read; a fully marked file becomes read |
-| `b` | who last touched the selected lines, with PR numbers |
-| `r` | sync: refetch the head on demand, keep marks for untouched files, badge what changed |
-| `i` | for a file that changed since your read: only what changed, or the whole diff |
-| `v` | show or hide the PR description |
-| `?` | every key, on screen |
-| `e` | whole file with inline hunks, or hunks only |
-| `w` | split or unified |
-| `c` | in Commits: whole commit or one file |
-| `[` / `]` | in a stacked commit: jump between files |
+| `space` / `⇧space` | next / previous change |
+| `u` | mark read, open the next unread |
+| `⌘K` | open, search, any action |
+| `esc` | close what is open, clear the selection |
+
+**Hover.** Hover a name in the code for what TypeScript knows about it: its signature and doc, where it is defined (click to open), how many files use it and which of them this PR also changes, that it comes from a package whose types are not installed in the checkout, or that it is built into JavaScript. When this PR changed its signature, the card shows it before and after. Each file uses the project of the nearest `tsconfig.json` or `jsconfig.json` above it, so aliases resolve as in an editor. TypeScript and JavaScript only; the language service builds in the background once a PR opens.
 
 ## Claude Code in the page
 
-`a` opens the agent sidebar. It lists your Claude Code sessions from every project, with summary, directory, branch and last activity. Click one and that session resumes in a real terminal inside the page, the same CLI you run in a shell, with every prompt and slash command intact. Or start a new session in the PR checkout. Several can be open as tabs; they survive page reloads while the daemon runs.
+**Agent** in the top bar opens the agent panel: your Claude Code sessions as real terminals, the same CLI you run in a shell, with every prompt and slash command intact. Several can be open as tabs; they keep running while the panel is hidden, and survive page reloads while the daemon runs.
 
-**Review comments to the agent.** Select lines in any file, press `d`, write, `⌘enter`. The comment lands in the active session as a message carrying the file, the line range, the PR and head SHA, and the selected code. GitHub's gesture, with the agent as the recipient. The answer is read back from the session's transcript on disk, never from the terminal stream, and shown under the lines it is about and in the **Doubts** tab, where each doubt can be ticked resolved once you understand.
+**Doubts to the agent.** Ask a doubt on a line, write, and pick where it goes in **Send to**: a session already open here, a session that worked in this PR's checkout, one in another PR's checkout, one in your own clone of the repo, or a new session in this PR's checkout. Each choice says what that session will see when it reads files. The choice is remembered per PR. Send (or `⌘enter`) starts or resumes the session in the panel and hands it a message carrying the file, the lines, the PR and head SHA, and the code; a session that is still starting gets it once its input is ready. The answer is read back from the session's transcript on disk, never from the terminal stream, and shown under the lines it is about. The **Updates** tray at the top of the panel lists every doubt with its status and session; an answer that arrived while you were reading another file gets a dot and **Agent** shows how many are new. Click one to go to its line. In the **Doubts** tab each can be ticked resolved once you understand.
 
 **Signals, never grades.** Small markers in the tree for facts worth a look first: a file rewritten by more than one commit in the PR (↻), test or assertion lines removed (−t), dependency lines added (+dep), TODO or FIXME added, the same block added in two places (=), a sensitive path (!), and the CODEOWNERS area in the file bar. A `.doubt.json` in the repo with `{ "sensitive": [...] }` extends the sensitive list.
 
-It is a cloud-shell architecture: a pseudo-terminal on the daemon (`node-pty`), `xterm.js` in the browser, a WebSocket between. Nothing of the CLI is re-implemented. The nested session gets a clean environment so it never thinks it is running inside another Claude Code.
+The terminals are a cloud-shell architecture: a pseudo-terminal on the daemon (`node-pty`), `xterm.js` in the browser, a WebSocket between. Nothing of the CLI is re-implemented. The nested session gets a clean environment so it never thinks it is running inside another Claude Code.
 
 A PR checkout is someone else's code, so a Claude started there loads only your user settings: the PR's own `.claude/settings.json` (hooks, permissions) never configures your reviewer. Sessions resumed in your own projects keep their project settings. The daemon only answers its own page: requests from another site's page are refused.
 
@@ -72,7 +60,7 @@ What you do in the tool (PRs opened, files viewed, verdicts, doubts sent) is app
 
 ```
 daemon/   server.ts git.ts github.ts state.ts term.ts transcript.ts signals.ts lang.ts   (Node, tsx)
-ui/       Vite + React + @pierre/diffs
+ui/       Vite + React + @pierre/diffs: App, Tree, Palette, Agent, HoverCard
 spike/    the first-hour risk check, kept as a record
 ```
 
