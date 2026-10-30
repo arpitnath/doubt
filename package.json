@@ -12,6 +12,7 @@
     "ui:build": "vite build --config ui/vite.config.ts",
     "spike": "tsx spike/sdk.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "tsx daemon/lang.check.ts",
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true"
   },
   "dependencies": {
