@@ -88,6 +88,13 @@ async function openPr(url: string, force = false): Promise<Open> {
   try { return await p; } finally { opening.delete(key); }
 }
 
+// A person opening a PR, from the page or the command line; a sync refetch is not an open.
+async function openForReview(url: string): Promise<Open> {
+  const o = await openPr(url);
+  logEvent({ type: 'open', pr: stateKey(o.state), head: o.state.headSha });
+  return o;
+}
+
 // everything we have ever opened: in memory first, then state files on disk
 function knownPrs(): Array<{ key: string; url: string; owner: string; repo: string; number: number; title: string; author: string; read: number; files: number; open: boolean; updated: number }> {
   const out = new Map<string, ReturnType<typeof knownPrs>[number]>();
@@ -165,8 +172,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJson(req);
     const target = String(body.url || '').trim();
     if (!/github\.com\/[^/]+\/[^/]+\/pull\/\d+/.test(target)) return json(res, 400, { error: 'paste a GitHub pull request URL' });
-    const o = await openPr(target);
-    logEvent({ type: 'open', pr: stateKey(o.state), head: o.state.headSha });
+    const o = await openForReview(target);
     return json(res, 200, { key: stateKey(o.state) });
   }
 
@@ -379,7 +385,7 @@ server.listen(port, '127.0.0.1', async () => {
   const base = `http://127.0.0.1:${port}`;
   let target = base;
   if (bootUrl) {
-    try { target = `${base}/#/pr/${stateKey((await openPr(bootUrl)).state)}`; } catch (err) { console.error(err); }
+    try { target = `${base}/#/pr/${stateKey((await openForReview(bootUrl)).state)}`; } catch (err) { console.error(err); }
   }
   console.error(`> doubt: ${target}`);
   if (!noOpen) execFile('open', [target], () => {});
