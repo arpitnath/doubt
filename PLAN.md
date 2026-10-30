@@ -72,7 +72,7 @@ Click the page once after it opens so it has keyboard focus.
 - **Try it:** in `useDebounce/index.js` click line 22, then each action.
 - **You should see:** Who touched this lists the real commit and PR for that line; Copy ref copies `packages/bruno-app/src/hooks/useDebounce/index.js:22`.
 - **Today:** select lines, then remember `d`, `b`, `y`, `⌘`-click.
-- [ ] built · [ ] verified
+- [x] built · [ ] verified
 
 ---
 

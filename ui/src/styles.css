@@ -244,3 +244,15 @@ kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: 
 .palette .row kbd { margin-left: auto; }
 .palette .row .kind { min-width: 44px; }
 .palette .row.act { font-family: inherit; }
+.linebar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 8px 6px; padding: 5px; width: fit-content; max-width: calc(100% - 16px); border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 8px 24px rgba(0,0,0,0.25); font-family: ui-sans-serif, -apple-system, "Inter", system-ui, sans-serif; font-size: 12px; white-space: normal; }
+.linebar button { padding: 4px 10px; }
+.linebar button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+.linebar button.x { border-color: transparent; color: var(--muted); }
+.linebar code { font-family: ui-monospace, Menlo, monospace; color: var(--accent); }
+.linebar .hint { color: var(--muted); padding: 0 4px; }
+.linebar.composer { display: block; width: min(560px, calc(100% - 16px)); border-color: var(--accent); }
+.linebar.composer label { display: block; color: var(--muted); font-size: 11px; }
+.linebar.composer textarea { display: block; margin-top: 6px; font-size: 13px; }
+.linebar.composer .row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.linebar.composer .to { flex: 1; color: var(--muted); font-size: 11px; }
+.linebar.composer .to b { color: var(--text); }

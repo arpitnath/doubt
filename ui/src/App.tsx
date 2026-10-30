@@ -51,6 +51,7 @@ function Review({ prKey }: { prKey: string }) {
   const [uiTheme, setUiTheme] = useState<Theme>(readTheme);
   useEffect(() => applyTheme(uiTheme), [uiTheme]);
   const [openAnswers, setOpenAnswers] = useState<Set<string>>(new Set()); // doubt ids whose inline answer is expanded
+  const [picked, setPicked] = useState<{ key: string; path: string; line: number; col: number; text: string } | null>(null); // the name last clicked in the code
   const changedSet = useMemo(() => new Set(pr?.changedSince ?? []), [pr?.changedSince]);
   const agentRef = useRef<AgentHandle>(null);
   const commentRef = useRef<HTMLTextAreaElement>(null);
@@ -327,15 +328,22 @@ function Review({ prKey }: { prKey: string }) {
     setPalette({ mode: 'locs', query: '', title, rows: locs.map((l) => ({ label: l.text || '', sub: l.path, line: l.line, path: l.path })) });
   }, [openPath]);
 
-  const tokenClick = useCallback((path: string, line: number, col: number, ev: MouseEvent) => {
-    if (!(ev.metaKey || ev.ctrlKey)) return;
-    ev.preventDefault();
-    const wantRefs = ev.altKey; // not shift: shift+click is pierre's range selection
+  const lookup = useCallback((path: string, line: number, col: number, wantRefs: boolean) => {
     setToast(wantRefs ? 'finding references…' : 'finding definition…');
     (wantRefs ? references(prKey, path, line, col) : definitions(prKey, path, line, col))
       .then((r) => { setToast(null); showLocs(wantRefs ? 'references' : 'definition', r.locs); })
       .catch((err) => setToast(err instanceof Error ? err.message : String(err)));
   }, [prKey, showLocs]);
+
+  // a plain click on a name remembers it for the line bar; ⌘-click goes to its definition, ⌘⌥-click lists its references
+  const tokenClick = useCallback((key: string, path: string, p: { lineNumber: number; lineCharStart: number; tokenText: string }, ev: MouseEvent) => {
+    if (!(ev.metaKey || ev.ctrlKey)) {
+      if (/^[A-Za-z_$][\w$]*$/.test(p.tokenText)) setPicked({ key, path, line: p.lineNumber, col: p.lineCharStart, text: p.tokenText });
+      return;
+    }
+    ev.preventDefault();
+    lookup(path, p.lineNumber, p.lineCharStart, ev.altKey); // not shift: shift+click is pierre's range selection
+  }, [lookup]);
 
   // ---- copy reference / copy with context (px0's Alt+C / Alt+A) ----------------------------------
   const copyRef = useCallback(async (withContext: boolean) => {
@@ -350,8 +358,12 @@ function Review({ prKey }: { prKey: string }) {
       const b = range ? Math.min(lines.length, range.end + 3) : Math.min(lines.length, 60);
       text = `\`\`\`\n// ${ref}\n${lines.slice(a - 1, b).join('\n')}\n\`\`\``;
     }
-    await navigator.clipboard.writeText(text);
-    setToast(`copied ${withContext ? 'with context' : ref}`);
+    try {
+      await navigator.clipboard.writeText(text);
+      setToast(`copied ${withContext ? 'with context' : ref}`);
+    } catch {
+      setToast(`the browser blocked the clipboard: ${ref}`); // say so, and show the ref so it can be copied by hand
+    }
   }, [focus, sel, textOf]);
 
   // hunks per shown item, from the patch text, so navigation and marks never depend on pierre's DOM
@@ -413,6 +425,43 @@ function Review({ prKey }: { prKey: string }) {
     setPr((p) => (p ? { ...p, doubts: fresh.doubts } : p));
   }, [pr, prKey, commentTarget, comment, textOf]);
 
+  // the line bar: what can be done with the selected lines, said in words; the doubt box opens in its place
+  function lineBar() {
+    if (!commentTarget?.range) return null;
+    const { path, range } = commentTarget;
+    const where = range.start === range.end ? `${path}:${range.start}` : `${path}:${range.start}-${range.end}`;
+    if (comment !== null) {
+      return (
+        <div className="linebar composer" onClick={(e) => e.stopPropagation()}>
+          <label>Your doubt on <code>{where}</code>. The file, lines and code go with it.
+            <textarea ref={commentRef} autoFocus rows={3} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="What don't you get about these lines?" />
+          </label>
+          <div className="row">
+            <span className="to">to <b>{agentRef.current?.activeTitle() ?? 'no session open: open the Agent panel first'}</b> · <kbd>⌘</kbd><kbd>enter</kbd> sends</span>
+            <button onClick={() => setComment(null)}>Cancel</button>
+            <button className="primary" onClick={() => void sendComment()}>Send</button>
+          </div>
+        </div>
+      );
+    }
+    const name = picked && picked.key === sel?.key && picked.line >= range.start && picked.line <= range.end ? picked : null;
+    return (
+      <div className="linebar" onClick={(e) => e.stopPropagation()}>
+        <button className="primary" onClick={() => { setComment(''); setTimeout(() => commentRef.current?.focus(), 0); }}>Ask a doubt</button>
+        {name
+          ? <>
+            <button onClick={() => lookup(name.path, name.line, name.col, false)} title="⌘-click a name does this too">Go to definition of <code>{name.text}</code></button>
+            <button onClick={() => lookup(name.path, name.line, name.col, true)} title="⌘⌥-click a name does this too">Who uses <code>{name.text}</code></button>
+          </>
+          : <span className="hint">click a name in the line for its definition and uses</span>}
+        <button onClick={() => void showHistory()}>Who touched this</button>
+        <button onClick={() => void copyRef(false)}>Copy ref</button>
+        <button onClick={() => void copyRef(true)} title="the lines with three lines of context, fenced">Copy with code</button>
+        <button className="x" onClick={() => { setSel(null); setPicked(null); }} aria-label="close">✕</button>
+      </div>
+    );
+  }
+
   // ---- sync on demand: refetch the head, keep marks for untouched files, show what changed -------
   const sync = useCallback(async () => {
     setToast('syncing…');
@@ -451,18 +500,15 @@ function Review({ prKey }: { prKey: string }) {
       const mod = e.metaKey || e.ctrlKey;
       if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); void openPalette('all'); return; }
       if (mod || e.altKey) return;
-      if (e.key === 'd') { e.preventDefault(); if (!commentTarget) { setToast('open a file first'); return; } setComment(''); setTimeout(() => commentRef.current?.focus(), 0); }
+      if (e.key === 'Escape') { setSel(null); setPicked(null); }
       else if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); stepHunk(e.shiftKey ? -1 : 1); }
-      else if (e.key === 'b') void showHistory();
-      else if (e.key === 'y') void copyRef(false);
-      else if (e.key === 'Y') void copyRef(true);
       else if (e.key === 'u') void judge('understood');
       else if (e.key === 'j') move(1);
       else if (e.key === 'k') move(-1);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [judge, move, openPalette, pickRow, copyRef, sendComment, commentTarget, comment, stepHunk, showHistory, palette, paletteRows, paletteIdx]);
+  }, [judge, move, openPalette, pickRow, sendComment, comment, stepHunk, palette, paletteRows, paletteIdx]);
 
   // ---- render -------------------------------------------------------------------------------------
   const theme = useMemo(() => ({ dark: 'github-dark' as const, light: 'github-light' as const }), []);
@@ -476,10 +522,17 @@ function Review({ prKey }: { prKey: string }) {
     stickyHeader: true,
     expandUnchanged: fullFile,
     enableLineSelection: true,
+    enableGutterUtility: true,
+    onGutterUtilityClick: (range: SelectedLineRange) => { setSel({ key: it.key, range }); setComment(null); },
+    onLineClick: (p: { lineNumber: number; annotationSide: 'deletions' | 'additions'; event: PointerEvent }) => {
+      if (p.event.shiftKey || p.event.metaKey || p.event.ctrlKey) return; // a range or a jump, not a pick
+      setSel({ key: it.key, range: { start: p.lineNumber, end: p.lineNumber, side: p.annotationSide } });
+      setComment(null);
+    },
     onLineSelectionEnd: (range: SelectedLineRange | null) => setSel(range ? { key: it.key, range } : null),
-    onTokenClick: (p: { lineNumber: number; lineCharStart: number; side?: 'deletions' | 'additions' }, ev: MouseEvent) => {
+    onTokenClick: (p: { lineNumber: number; lineCharStart: number; tokenText: string; side?: 'deletions' | 'additions' }, ev: MouseEvent) => {
       if (p.side === 'deletions') return; // definitions resolve against the new side only
-      tokenClick(it.path, p.lineNumber, p.lineCharStart, ev);
+      tokenClick(it.key, it.path, p, ev);
     },
     loadDiffFiles: loaderFor(it)
   }), [fullFile, split, theme, themeType, tokenClick]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -489,16 +542,29 @@ function Review({ prKey }: { prKey: string }) {
     themeType,
     stickyHeader: true,
     enableLineSelection: true,
+    enableGutterUtility: true,
+    onGutterUtilityClick: (range: SelectedLineRange) => { setSel({ key: path, range }); setComment(null); },
+    onLineClick: (p: { lineNumber: number; event: PointerEvent }) => {
+      if (p.event.shiftKey || p.event.metaKey || p.event.ctrlKey) return;
+      setSel({ key: path, range: { start: p.lineNumber, end: p.lineNumber } });
+      setComment(null);
+    },
     onLineSelectionEnd: (range: SelectedLineRange | null) => setSel(range ? { key: path, range } : null),
-    onTokenClick: (p: { lineNumber: number; lineCharStart: number }, ev: MouseEvent) => tokenClick(path, p.lineNumber, p.lineCharStart, ev)
+    onTokenClick: (p: { lineNumber: number; lineCharStart: number; tokenText: string }, ev: MouseEvent) => tokenClick(path, path, p, ev)
   }), [theme, themeType, tokenClick]);
 
-  type Ann = { doubt: string };
-  const annotationsFor = useCallback((it: Item): DiffLineAnnotation<Ann>[] => (pr?.doubts ?? [])
-    .filter((d) => d.path === it.path && d.lines && !d.resolved)
-    .map((d) => ({ side: 'additions' as const, lineNumber: d.lines!.end, metadata: { doubt: d.id } })), [pr?.doubts]);
+  type Ann = { doubt?: string; bar?: boolean };
+  const annotationsFor = useCallback((it: Item): DiffLineAnnotation<Ann>[] => {
+    const answers = (pr?.doubts ?? [])
+      .filter((d) => d.path === it.path && d.lines && !d.resolved)
+      .map((d) => ({ side: 'additions' as const, lineNumber: d.lines!.end, metadata: { doubt: d.id } }));
+    if (sel?.key !== it.key) return answers;
+    const end = Math.max(sel.range.start, sel.range.end);
+    return [...answers, { side: sel.range.endSide ?? sel.range.side ?? 'additions', lineNumber: end, metadata: { bar: true } }];
+  }, [pr?.doubts, sel]);
 
-  const renderAnn = useCallback((a: DiffLineAnnotation<Ann>) => {
+  const renderAnn = useCallback((a: { metadata: Ann }) => {
+    if (a.metadata.bar) return lineBar();
     const d = pr?.doubts.find((x) => x.id === a.metadata.doubt);
     if (!d) return null;
     const open = openAnswers.has(d.id);
@@ -508,7 +574,7 @@ function Review({ prKey }: { prKey: string }) {
         {d.answer ? d.answer : <span className="wait">{d.done ? 'no answer' : 'waiting for the session…'}</span>}
       </div>
     );
-  }, [pr?.doubts, openAnswers]);
+  }, [pr?.doubts, openAnswers, lineBar]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // context expansion: pierre asks for both full sides when a collapsed region is opened, or at once in full-file mode
   function loaderFor(it: Item) {
@@ -565,7 +631,7 @@ function Review({ prKey }: { prKey: string }) {
         {tab === 'repo' && (tree.length ? <Tree paths={tree} meta={fileByPath} readFiles={pr.readFiles} current={currentPath} onPick={(p) => openPath(p)} repo /> : <div className="empty">loading tree…</div>)}
         {tab === 'doubts' && (
           <div className="doubts">
-            {pr.doubts.filter((d) => d.path).length === 0 && <div className="empty">no doubts yet: select lines, <kbd>d</kbd>, write, <kbd>⌘enter</kbd></div>}
+            {pr.doubts.filter((d) => d.path).length === 0 && <div className="empty">no doubts yet: click a line, then Ask a doubt</div>}
             {[...pr.doubts].filter((d) => d.path).reverse().map((d) => (
               <div key={d.id} className={`doubt ${d.resolved ? 'resolved' : ''} ${openAnswers.has(d.id) ? 'open' : ''}`} onClick={() => { openPath(d.path!, d.lines?.start); setOpenAnswers((s) => new Set(s).add(d.id)); }}>
                 <div className="where">
@@ -655,7 +721,7 @@ function Review({ prKey }: { prKey: string }) {
         )}
         <div className="diff" ref={diffRef}>
           {view?.kind === 'repo' && (repoFile
-            ? <div className="stack"><PierreFile file={{ name: repoFile.path, contents: repoFile.contents }} options={fileOptionsFor(repoFile.path)} selectedLines={sel?.key === repoFile.path ? sel.range : null} disableWorkerPool /></div>
+            ? <div className="stack"><PierreFile<Ann> file={{ name: repoFile.path, contents: repoFile.contents }} options={fileOptionsFor(repoFile.path)} selectedLines={sel?.key === repoFile.path ? sel.range : null} lineAnnotations={sel?.key === repoFile.path ? [{ lineNumber: Math.max(sel.range.start, sel.range.end), metadata: { bar: true } }] : []} renderAnnotation={renderAnn} disableWorkerPool /></div>
             : <div className="empty">loading {view.path}…</div>)}
           {view?.kind !== 'repo' && items.length === 0 && <div className="empty">every file read</div>}
           {items.map((it) => (
@@ -677,13 +743,6 @@ function Review({ prKey }: { prKey: string }) {
       )}
       {agentOpen && <Agent ref={agentRef} theme={uiTheme} workdir={pr.dir} workdirLabel={`${pr.repo}#${pr.number}`} onClose={() => setAgentOpen(false)} />}
 
-      {comment !== null && commentTarget && (
-        <div className="comment" style={{ right: agentOpen ? 540 : 24, bottom: 24 }}>
-          <div className="ref">{commentTarget.range ? `${commentTarget.path}:${commentTarget.range.start}-${commentTarget.range.end}` : commentTarget.path}</div>
-          <textarea ref={commentRef} rows={4} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="what should the agent look at here?" />
-          <div className="to">to <b>{agentRef.current?.activeTitle() ?? 'no session open, press a'}</b> · <kbd>⌘</kbd><kbd>enter</kbd> send · <kbd>esc</kbd> cancel</div>
-        </div>
-      )}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
