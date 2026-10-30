@@ -240,3 +240,7 @@ kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: 
 .top .progress { margin-left: 0; }
 .main > .sigline { max-width: none; margin: 0; padding: 5px 14px; border-bottom: 1px solid var(--line); }
 .main .bar .path { direction: rtl; text-align: left; } /* cut the start of a long path, keep the file name */
+.keyhints { display: flex; flex-wrap: wrap; gap: 16px; padding: 6px 14px; border-top: 1px solid var(--line); background: var(--panel); color: var(--muted); font-size: 12px; }
+.palette .row kbd { margin-left: auto; }
+.palette .row .kind { min-width: 44px; }
+.palette .row.act { font-family: inherit; }

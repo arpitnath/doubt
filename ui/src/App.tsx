@@ -6,6 +6,7 @@ import { Landing } from './Landing';
 import { Agent, type AgentHandle } from './Agent';
 import { marked } from 'marked';
 import { THEMES, applyTheme, readTheme, type Theme } from './theme';
+import { Palette, type PaletteMode, type PaletteState, type Row } from './Palette';
 
 // hash routing, nothing more: #/ is the landing page, #/pr/<key> is a review
 function useHash(): string {
@@ -28,8 +29,6 @@ export function App() {
 type Tab = 'files' | 'commits' | 'repo' | 'doubts';
 type View = { kind: 'file'; path: string } | { kind: 'commit'; sha: string } | { kind: 'chunk'; id: string } | { kind: 'repo'; path: string };
 interface Item { key: string; path: string; oldPath?: string; oldRev: string; newRev: string; read: boolean; status: string; adds: number; dels: number }
-type PaletteMode = 'open' | 'search' | 'outline' | 'locs' | 'history';
-interface Row { label: string; sub?: string; kind?: string; line?: number; path: string }
 
 function Review({ prKey }: { prKey: string }) {
   const [pr, setPr] = useState<PrState | null>(null);
@@ -43,13 +42,12 @@ function Review({ prKey }: { prKey: string }) {
   const [jump, setJump] = useState<{ path: string; line: number } | null>(null); // land here once rendered
   const [sel, setSel] = useState<{ key: string; range: SelectedLineRange } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [palette, setPalette] = useState<{ mode: PaletteMode; query: string; rows: Row[]; title?: string } | null>(null);
+  const [palette, setPalette] = useState<PaletteState | null>(null);
   const [agentOpen, setAgentOpen] = useState(false);
   const [comment, setComment] = useState<string | null>(null); // the review comment being written, null when closed
   const [cursor, setCursor] = useState<{ key: string; hunk: number } | null>(null); // the hunk last jumped to
   const [since, setSince] = useState(false); // interdiff: only what changed since the previous head
   const [showDesc, setShowDesc] = useState(false);
-  const [showHelp, setShowHelp] = useState(false);
   const [uiTheme, setUiTheme] = useState<Theme>(readTheme);
   useEffect(() => applyTheme(uiTheme), [uiTheme]);
   const [openAnswers, setOpenAnswers] = useState<Set<string>>(new Set()); // doubt ids whose inline answer is expanded
@@ -261,15 +259,48 @@ function Review({ prKey }: { prKey: string }) {
     setPalette({ mode, query: '', rows: [] });
   }, [focus, textOf]);
 
-  const paletteRows = useMemo((): Row[] => {
-    if (!palette) return [];
-    if (palette.mode === 'open') return fuzzy(palette.query, tree).map((p) => ({ label: p.slice(p.lastIndexOf('/') + 1), sub: p.slice(0, Math.max(0, p.lastIndexOf('/'))), path: p }));
-    if (palette.mode === 'outline') {
-      const qq = palette.query.toLowerCase();
-      return palette.rows.filter((r) => !qq || r.label.toLowerCase().includes(qq));
-    }
-    return palette.rows;
-  }, [palette, tree]);
+  // every action the screen offers, for ⌘K; buttons stay the primary way, this is the fast one
+  const actions = (): Row[] => {
+    if (!pr) return [];
+    const shownRead = items.length > 0 && items.every((i) => i.read);
+    const noise = pr.files.filter((f) => isNoise(f) && !isRead(f.path)).length;
+    const list: Array<Row | false> = [
+      view?.kind !== 'repo' && items.length > 0 && { label: shownRead ? 'Mark unread' : 'Mark read, open the next unread', terms: 'mark read unread understood', hint: 'u', run: () => void judge(shownRead ? 'none' : 'understood') },
+      { label: 'Next file', hint: 'j', run: () => move(1) },
+      { label: 'Previous file', hint: 'k', run: () => move(-1) },
+      { label: split && !fullFile ? 'Show unified' : 'Show split', terms: 'layout split unified side by side', run: () => { setSplit(!(split && !fullFile)); setFullFile(false); } },
+      { label: fullFile ? 'Show the changes only' : 'Show the whole file', terms: 'scope whole file changes only', run: () => setFullFile((v) => !v) },
+      { label: 'Search the repo for text…', run: () => { setPaletteIdx(0); setPalette({ mode: 'search', query: '', rows: [] }); } },
+      { label: 'Outline of this file…', run: () => void openPalette('outline') },
+      { label: showDesc ? 'Hide the PR description' : 'Show the PR description', terms: 'description body', run: () => setShowDesc((x) => !x) },
+      { label: 'Sync with GitHub', run: () => void sync() },
+      { label: agentOpen ? 'Hide the agent panel' : 'Show the agent panel', terms: 'agent claude session terminal', run: () => setAgentOpen((v) => !v) },
+      noise > 0 && { label: `Skip ${noise} noise file${noise === 1 ? '' : 's'}`, run: () => void skipNoise() },
+      { label: 'Go to Changes', run: () => switchTab('files') },
+      { label: 'Go to Commits', run: () => switchTab('commits') },
+      { label: 'Go to Repo', run: () => switchTab('repo') },
+      { label: 'Go to Doubts', run: () => switchTab('doubts') },
+      { label: `Theme: switch to ${THEMES[(THEMES.indexOf(uiTheme) + 1) % THEMES.length]}`, terms: 'theme dark dim light', run: () => setUiTheme((t) => THEMES[(THEMES.indexOf(t) + 1) % THEMES.length]) },
+      { label: 'All pull requests', run: () => { window.location.hash = '#/'; } }
+    ];
+    return list.filter((r): r is Row => !!r).map((r) => ({ ...r, kind: 'action' }));
+  };
+
+  let paletteRows: Row[] = [];
+  if (palette?.mode === 'all') {
+    const qq = palette.query.trim().toLowerCase();
+    const acts = actions().filter((a) => !qq || `${a.label} ${a.terms ?? ''}`.toLowerCase().includes(qq));
+    // files this PR changes come first: in a review they are what you are looking for
+    const matches = fuzzy(palette.query, tree, 60);
+    const ranked = [...matches.filter((p) => fileByPath.has(p)), ...matches.filter((p) => !fileByPath.has(p))].slice(0, 20);
+    const files: Row[] = ranked.map((p) => ({ kind: fileByPath.get(p)?.status ?? 'file', label: p.slice(p.lastIndexOf('/') + 1), sub: p.slice(0, Math.max(0, p.lastIndexOf('/'))), path: p }));
+    paletteRows = qq ? [...acts.slice(0, 5), ...files] : acts;
+  } else if (palette?.mode === 'outline') {
+    const qq = palette.query.toLowerCase();
+    paletteRows = palette.rows.filter((r) => !qq || r.label.toLowerCase().includes(qq));
+  } else if (palette) {
+    paletteRows = palette.rows;
+  }
 
   // search as you type, debounced, newest query wins
   useEffect(() => {
@@ -284,7 +315,8 @@ function Review({ prKey }: { prKey: string }) {
 
   const pickRow = useCallback((r: Row) => {
     setPalette(null);
-    if (r.line !== undefined || palette?.mode === 'open') openPath(r.path, r.line);
+    if (r.run) r.run();
+    else if (r.path && (r.line !== undefined || palette?.mode === 'all')) openPath(r.path, r.line);
   }, [openPath, palette?.mode]);
 
   // ---- code intelligence: cmd-click a token for its definition, shift-cmd-click for references --
@@ -417,21 +449,14 @@ function Review({ prKey }: { prKey: string }) {
       }
       if (typing) return;
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.key === 'p') { e.preventDefault(); void openPalette('open'); return; }
-      if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); void openPalette('search'); return; }
-      if (mod && e.shiftKey && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); void openPalette('outline'); return; }
+      if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); void openPalette('all'); return; }
       if (mod || e.altKey) return;
       if (e.key === 'd') { e.preventDefault(); if (!commentTarget) { setToast('open a file first'); return; } setComment(''); setTimeout(() => commentRef.current?.focus(), 0); }
-      else if (e.key === 'p') { e.preventDefault(); void openPalette('open'); } // preventDefault: the p must not land in the input that autofocuses
-      else if (e.key === 'g') { e.preventDefault(); void openPalette('search'); }
-      else if (e.key === 'o') { e.preventDefault(); void openPalette('outline'); }
       else if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); stepHunk(e.shiftKey ? -1 : 1); }
       else if (e.key === 'b') void showHistory();
       else if (e.key === 'y') void copyRef(false);
       else if (e.key === 'Y') void copyRef(true);
       else if (e.key === 'u') void judge('understood');
-      else if (e.key === '?') setShowHelp((x) => !x);
-      else if (e.key === 'Escape') setShowHelp(false);
       else if (e.key === 'j') move(1);
       else if (e.key === 'k') move(-1);
     };
@@ -521,7 +546,7 @@ function Review({ prKey }: { prKey: string }) {
           Sync{changedSet.size ? <span className="badge" title={`changed since ${pr.prevHeadSha?.slice(0, 7)}`}>{changedSet.size} changed</span> : null}
         </button>
         <button className={agentOpen ? 'on' : ''} onClick={() => setAgentOpen((v) => !v)} title="your Claude Code sessions, as terminals">Agent</button>
-        <button className="cmdk" onClick={() => void openPalette('open')} title="open a file">Open, search, actions… <kbd>⌘K</kbd></button>
+        <button className="cmdk" onClick={() => void openPalette('all')} title="open a file, search the repo, run any action">Open, search, actions… <kbd>⌘K</kbd></button>
         <button className="theme" onClick={() => setUiTheme((t) => THEMES[(THEMES.indexOf(t) + 1) % THEMES.length])} title="switch theme: dark, dim, light">Theme: {uiTheme}</button>
       </div>
 
@@ -643,36 +668,12 @@ function Review({ prKey }: { prKey: string }) {
             </div>
           ))}
         </div>
+        <div className="keyhints"><span><kbd>j</kbd> <kbd>k</kbd> next / previous</span><span><kbd>space</kbd> next change</span><span><kbd>u</kbd> mark read</span><span><kbd>⌘K</kbd> everything else</span><span><kbd>esc</kbd> close</span></div>
       </div>
 
       {palette && (
-        <div className="palette" onClick={() => setPalette(null)}>
-          <div className="box" onClick={(e) => e.stopPropagation()}>
-            <div className="mode">
-              <span><b>{palette.mode === 'open' ? 'open file' : palette.mode === 'search' ? 'search repo' : palette.mode === 'outline' ? 'outline' : palette.mode === 'history' ? 'history' : palette.title}</b></span>
-              {palette.mode === 'history' && <span>{palette.title} · who last touched these lines, at the PR head</span>}
-              {palette.mode === 'outline' && <span>{palette.title}</span>}
-              {palette.mode === 'locs' && <span>{palette.rows.length} places</span>}
-              {palette.mode === 'search' && <span>{palette.rows.length ? `${palette.rows.length} hits` : 'git grep, case-insensitive'}</span>}
-            </div>
-            {palette.mode !== 'locs' && palette.mode !== 'history' && (
-              <input autoFocus value={palette.query} placeholder={palette.mode === 'open' ? 'file name…' : palette.mode === 'search' ? 'text to find…' : 'symbol…'} onChange={(e) => { const v = e.target.value; setPalette((p) => (p ? { ...p, query: v } : p)); setPaletteIdx(0); }} />
-            )}
-            <div className="list">
-              {paletteRows.length === 0
-                ? <div className="none">{palette.mode === 'open' ? `${tree.length} files in the repo` : palette.mode === 'outline' ? 'no symbols found' : palette.query.length < 2 ? 'type at least two characters' : 'no match'}</div>
-                : paletteRows.map((r, i) => (
-                  <div key={`${r.path}:${r.line ?? ''}:${i}`} className={`row ${i === paletteIdx ? 'on' : ''}`} onMouseEnter={() => setPaletteIdx(i)} onClick={() => pickRow(r)}>
-                    {r.kind && <span className="kind">{r.kind}</span>}
-                    {palette.mode === 'open' && <span className="st">{fileByPath.get(r.path)?.status ?? ''}</span>}
-                    <span className={palette.mode === 'open' ? '' : 'text'}>{r.label}</span>
-                    {r.sub !== undefined && <span className="dir">{r.sub}</span>}
-                    {r.line !== undefined && <span className="line">{r.line}</span>}
-                  </div>
-                ))}
-            </div>
-          </div>
-        </div>
+        <Palette palette={palette} rows={paletteRows} index={paletteIdx} fileCount={tree.length} onIndex={setPaletteIdx} onClose={() => setPalette(null)} onPick={pickRow}
+          onQuery={(v) => { setPalette((p) => (p ? { ...p, query: v } : p)); setPaletteIdx(0); }} />
       )}
       {agentOpen && <Agent ref={agentRef} theme={uiTheme} workdir={pr.dir} workdirLabel={`${pr.repo}#${pr.number}`} onClose={() => setAgentOpen(false)} />}
 
@@ -681,46 +682,6 @@ function Review({ prKey }: { prKey: string }) {
           <div className="ref">{commentTarget.range ? `${commentTarget.path}:${commentTarget.range.start}-${commentTarget.range.end}` : commentTarget.path}</div>
           <textarea ref={commentRef} rows={4} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="what should the agent look at here?" />
           <div className="to">to <b>{agentRef.current?.activeTitle() ?? 'no session open, press a'}</b> · <kbd>⌘</kbd><kbd>enter</kbd> send · <kbd>esc</kbd> cancel</div>
-        </div>
-      )}
-      {showHelp && (
-        <div className="palette" onClick={() => setShowHelp(false)}>
-          <div className="box help" onClick={(e) => e.stopPropagation()}>
-            <div className="mode"><span><b>keys</b></span><span>press <kbd>?</kbd> or <kbd>esc</kbd> to close</span></div>
-            <div className="cols">
-              <div>
-                <h4>read</h4>
-                <div><kbd>u</kbd> read the shown file or commit, next unread</div>
-                <div><kbd>x</kbd> unmark</div>
-                <div><kbd>n</kbd> mark every noise file read</div>
-                <div><kbd>space</kbd> / <kbd>⇧space</kbd> next / previous hunk</div>
-                <div><kbd>j</kbd> / <kbd>k</kbd> next / previous file or commit</div>
-                <div><kbd>[</kbd> / <kbd>]</kbd> files inside a stacked commit</div>
-                <h4>view</h4>
-                <div><kbd>e</kbd> whole file with inline hunks, or hunks only</div>
-                <div><kbd>w</kbd> split or unified</div>
-                <div><kbd>c</kbd> in Commits: whole commit or one file</div>
-                <div><kbd>v</kbd> PR description</div>
-                <div><kbd>i</kbd> only what changed since the previous head</div>
-                <div><kbd>s</kbd> cycle Changes, Commits, Repo, Doubts</div>
-              </div>
-              <div>
-                <h4>find</h4>
-                <div><kbd>p</kbd> open any file by name</div>
-                <div><kbd>g</kbd> search the repo</div>
-                <div><kbd>o</kbd> outline of the file in focus</div>
-                <div><kbd>b</kbd> who last touched the selected lines</div>
-                <div><kbd>⌘</kbd>click go to definition · <kbd>⌘⌥</kbd>click references</div>
-                <h4>take out</h4>
-                <div><kbd>y</kbd> copy path:line · <kbd>Y</kbd> copy with context</div>
-                <h4>agent</h4>
-                <div><kbd>a</kbd> agent sidebar: your Claude Code sessions, as terminals</div>
-                <div><kbd>d</kbd> review comment on the selected lines, <kbd>⌘enter</kbd> sends</div>
-                <h4>sync</h4>
-                <div><kbd>r</kbd> refetch the head, keep marks for untouched files</div>
-              </div>
-            </div>
-          </div>
         </div>
       )}
       {toast && <div className="toast">{toast}</div>}

@@ -65,7 +65,7 @@ Click the page once after it opens so it has keyboard focus.
 - **Try it:** press `⌘K`, type `debounce`, open the file; press `⌘K`, type `split`, run it.
 - **You should see:** files and actions in one list; running an action closes the palette.
 - **Today:** `p`, `g` and `o` open three different palettes.
-- [ ] built · [ ] verified
+- [x] built · [ ] verified
 
 ### 1.4 Line actions
 - **What changes:** a `+` in the gutter and click-a-line open *Ask a doubt*, *Go to definition*, *Who touched this*, *Copy ref*.
